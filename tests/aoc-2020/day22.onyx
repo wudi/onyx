@@ -1,4 +1,4 @@
-#load "core/module"
+
 
 use core {*}
 
@@ -8,7 +8,7 @@ key_alloc : Allocator;
 score_player :: (p: &[..] u32) -> u32 {
     count := 0;
     mul := p.count;
-    for c: *p {
+    for c in *p {
         count += c * mul;
         mul -= 1;
     }
@@ -45,12 +45,12 @@ encode_hands :: (alloc: Allocator, p1: &[..] u32, p2: &[..] u32) -> str {
     stream := io.buffer_stream_make(256, alloc);
     writer := io.writer_make(&stream, 0);
 
-    for n: *p1 {
+    for n in *p1 {
         io.write_i64(&writer, ~~n, 64);
         io.write_str(&writer, ",");
     }
     io.write_str(&writer, "|");
-    for n: *p2 {
+    for n in *p2 {
         io.write_i64(&writer, ~~n, 64);
         io.write_str(&writer, ",");
     }
@@ -110,7 +110,7 @@ main :: (args: [] cstr) {
     defer array.free(&player2);
 
     string.advance_line(&file); // 'Player 1:'
-    while file[0] != #char "\n" {
+    while file[0] != '\n' {
         card := cast(u32, conv.parse_int(&file));
         array.push(&player1, card);
 

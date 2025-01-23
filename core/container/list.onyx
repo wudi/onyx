@@ -16,22 +16,33 @@ List :: struct (Elem_Type: type_expr) {
     last:  &ListElem(Elem_Type) = null;
 }
 
-#inject List {
-    free         :: free
-    push_end     :: push_end
-    push_begin   :: push_begin
-    pop_end      :: pop_end
-    pop_begin    :: pop_begin
-    count        :: count
-    at           :: at
-    contains     :: contains
-    fold         :: fold
-    map          :: map
-    as_iter      :: as_iter
-}
+List.free         :: free
+List.push_end     :: push_end
+List.push_begin   :: push_begin
+List.pop_end      :: pop_end
+List.pop_begin    :: pop_begin
+List.count        :: count
+List.at           :: at
+List.contains     :: contains
+List.fold         :: fold
+List.map          :: map
+List.as_iter      :: as_iter
 
 make :: ($T: type_expr, allocator := context.allocator) -> List(T) {
     return .{ allocator = allocator };
+}
+
+#overload
+__make_overload :: (_: &List($T), allocator := context.allocator) -> List(T) {
+    return #this_package.make(T, allocator);
+}
+
+from_array :: (arr: [] $T, allocator := context.allocator) -> List(T) {
+    l := make(T, allocator);
+    for& arr {
+        push_end(&l, *it);
+    }
+    return l;
 }
 
 free :: (list: &List) {
@@ -48,10 +59,10 @@ push_end :: (list: &List, x: list.Elem_Type) {
     new_elem.data = x;
 
     new_elem.prev = list.last;
-    list.last.next = new_elem;
+    if list.last do list.last.next = new_elem;
     list.last = new_elem;
 
-    if list.first == null do list.first = new_elem;
+    if !list.first do list.first = new_elem;
 }
 
 push_begin :: (list: &List, x: list.Elem_Type) {
@@ -59,10 +70,10 @@ push_begin :: (list: &List, x: list.Elem_Type) {
     new_elem.data = x;
 
     new_elem.next = list.first;
-    list.first.prev = new_elem;
+    if list.first do list.first.prev = new_elem;
     list.first = new_elem;
 
-    if list.last == null do list.last = new_elem;
+    if !list.last do list.last = new_elem;
 }
 
 pop_end :: (list: &List($T), default: T = .{}) -> T {
@@ -70,7 +81,11 @@ pop_end :: (list: &List($T), default: T = .{}) -> T {
 
     end := list.last;
     list.last = list.last.prev;
-    list.last.next = null;
+    if list.last {
+        list.last.next = null;
+    } else {
+        list.first = null;
+    }
 
     defer raw_free(list.allocator, end);
     return end.data;
@@ -81,10 +96,48 @@ pop_begin :: (list: &List($T), default: T = .{}) -> T {
 
     begin := list.first;
     list.first = list.first.next;
-    list.first.prev = null;
+    if list.first {
+        list.first.prev = null;
+    } else {
+        list.last = null;
+    }
 
     defer raw_free(list.allocator, begin);
     return begin.data;
+}
+
+pop_end_opt :: (list: &List($T)) -> ? T {
+    if list.last == null do return .None;
+
+    end := list.last;
+    list.last = list.last.prev;
+    if list.last {
+        list.last.next = null;
+    } else {
+        list.first = null;
+    }
+
+    defer raw_free(list.allocator, end);
+    return end.data;
+}
+
+pop_begin_opt :: (list: &List($T)) -> ? T {
+    if list.last == null do return .None;
+
+    begin := list.first;
+    list.first = list.first.next;
+    if list.first {
+        list.first.prev = null;
+    } else {
+        list.last = null;
+    }
+
+    defer raw_free(list.allocator, begin);
+    return begin.data;
+}
+
+empty :: (list: &List) -> bool {
+    return list.first == null;
 }
 
 count :: (list: &List) -> i32 {
@@ -98,7 +151,7 @@ count :: (list: &List) -> i32 {
     return c;
 }
 
-at :: (list: &List, index: i32) -> &T {
+at :: (list: &List($T), index: i32) -> &T {
     elem := list.first;
     while elem != null {
         if index == 0 do return &elem.data;
@@ -131,8 +184,7 @@ fold :: (list: &List($T), init: $R, f: (T, R) -> R) -> R {
     return val;
 }
 
-map :: #match #local {}
-#match map (list: &List($T), f: (T) -> $R) -> List(R) {
+map :: (list: &List($T), f: (T) -> $R) -> List(R) {
     new_list := make(R, allocator=list.allocator);
     elem := list.first;
     while elem != null {
@@ -143,24 +195,17 @@ map :: #match #local {}
     return new_list;
 }
 
-#match map (list: &List($T), f: (&T) -> void) {
-    elem := list.first;
-    while elem != null {
-        f(&elem.data);
-        elem = elem.next;
-    }
-}
-
-
-#match core.iter.as_iter as_iter
 as_iter :: (list: &List) =>
     core.iter.generator(&.{current = list.first}, (ctx) => {
         if ctx.current != null {
             defer ctx.current = ctx.current.next;
-            return ctx.current.data, true;
+            return Optional.make(ctx.current.data);
         }
 
-        return .{}, false;
+        return .None;
     });
+
+#overload
+core.iter.as_iter :: as_iter
 
 #local allocate_elem :: macro (list: &List($T)) => new(ListElem(T), allocator=list.allocator);

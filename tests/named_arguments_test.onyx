@@ -1,4 +1,4 @@
-#load "core/module"
+
 
 use core {*}
 
@@ -42,7 +42,7 @@ main :: (args: [] cstr) {
         println(x);
         println(y);
 
-        for elem: z do printf("{} ", elem);
+        for elem in z do printf("{} ", elem);
         print("\n");
     }
 

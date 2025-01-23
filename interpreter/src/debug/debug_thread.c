@@ -49,7 +49,7 @@ static void send_string(debug_state_t *debug, const char *str) {
     }
 }
 
-static void send_bytes(debug_state_t *debug, const char *bytes, unsigned int len) {
+static void send_bytes(debug_state_t *debug, const unsigned char *bytes, unsigned int len) {
     bh_buffer_write_u32(&debug->send_buffer, len);
     bh_buffer_append(&debug->send_buffer, bytes, len);
 }
@@ -92,11 +92,11 @@ static char *parse_string(debug_state_t *debug, struct msg_parse_ctx_t *ctx) {
 
 static void resume_thread(debug_thread_state_t *thread) {
     thread->run_count = -1;
-    sem_post(&thread->wait_semaphore);
+    semaphore_post(thread->wait_semaphore);
 }
 
 static void resume_thread_slow(debug_thread_state_t *thread) {
-    sem_post(&thread->wait_semaphore);
+    semaphore_post(thread->wait_semaphore);
 }
 
 static u32 get_stack_frame_instruction_pointer(debug_state_t *debug, debug_thread_state_t *thread, ovm_stack_frame_t *frame) {
@@ -186,7 +186,7 @@ static DEBUG_COMMAND_HANDLER(debug_command_brk) {
 
     debug_file_info_t file_info;
     debug_info_lookup_file_by_name(debug->info, filename, &file_info);
-    
+
     debug_breakpoint_t bp;
     bp.id = debug->next_breakpoint_id++;
     bp.instr = instr;
@@ -239,7 +239,7 @@ static DEBUG_COMMAND_HANDLER(debug_command_clr_brk) {
 static DEBUG_COMMAND_HANDLER(debug_command_step) {
     u32 granularity = parse_int(debug, ctx);
     u32 thread_id = parse_int(debug, ctx);
-    
+
     if (granularity == 1) {
         ON_THREAD(thread_id) {
             (*thread)->pause_at_next_line = true;
@@ -420,7 +420,7 @@ static DEBUG_COMMAND_HANDLER(debug_command_vars) {
 
                     debug_runtime_value_build_clear(&builder);
                 }
-                
+
                 // This is important, as when doing a layered query, only one symbol
                 // should be considered, and once found, should immediate stop.
                 goto syms_done;
@@ -445,7 +445,7 @@ static DEBUG_COMMAND_HANDLER(debug_command_vars) {
 
         symbol_scope = sym_scope.parent;
     }
-        
+
   syms_done:
     send_int(debug, 1);
     debug_runtime_value_build_free(&builder);
@@ -470,7 +470,7 @@ static DEBUG_COMMAND_HANDLER(debug_command_memory_write) {
     u32 addr = parse_int(debug, ctx);
     u32 count;
 
-    u8 *data = parse_bytes(debug, ctx, &count);
+    u8 *data = (u8 *)parse_bytes(debug, ctx, &count);
     memcpy(bh_pointer_add(debug->ovm_engine->memory, addr), data, count);
 
     send_response_header(debug, msg_id);
@@ -564,39 +564,13 @@ static void process_message(debug_state_t *debug, char *msg, unsigned int bytes_
     }
 }
 
-void *__debug_thread_entry(void * data) {
-    debug_state_t *debug = data;
-    debug->debug_thread_running = true;
-
-    // Set up socket listener
-    // Wait for initial connection/handshake before entering loop.
-    
-    debug->listen_socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-
-    struct sockaddr_un local_addr, remote_addr;
-    local_addr.sun_family = AF_UNIX;
-    strcpy(local_addr.sun_path, debug->listen_path); // TODO: Make this dynamic so mulitple servers can exist at a time.
-    unlink(local_addr.sun_path);                     // TODO: Remove this line for the same reason.
-    int len = strlen(local_addr.sun_path) + sizeof(local_addr.sun_family);
-    bind(debug->listen_socket_fd, (struct sockaddr *)&local_addr, len);
-
-    //
-    // Currently, there can only be 1 connected debugger instance at a time.
-    listen(debug->listen_socket_fd, 1);
-
-    len = sizeof(struct sockaddr_un);
-    debug->client_fd = accept(debug->listen_socket_fd, (void * restrict)&remote_addr, &len);
-
-    close(debug->listen_socket_fd);
-
+static void debug_session_handler(debug_state_t *debug) {
     // Disable blocking reads and write in the client socket
     // Alternatively, a MSG_DONTWAIT could be used below
     fcntl(debug->client_fd, F_SETFL, O_NONBLOCK);
     fcntl(debug->state_change_pipes[0], F_SETFL, O_NONBLOCK);
 
     printf("[INFO ] Client connected\n");
-
-    bh_buffer_init(&debug->send_buffer, bh_heap_allocator(), 1024);
 
     struct pollfd poll_fds[2];
     poll_fds[0].fd = debug->state_change_pipes[0];
@@ -614,26 +588,34 @@ void *__debug_thread_entry(void * data) {
         // do anything.
         if (debug->threads[0]->ovm_state->call_depth <= 0) {
             debug->debug_thread_running = false;
-            break;
+            return;
         }
 
         //
         // Try to read commands from the client.
         // If an error was returned, bail out of this thread.
         i32 bytes_read = recv(debug->client_fd, command, 4096, 0);
+        if (bytes_read == 0) {
+            printf("[INFO ] OVM Debugger connection closed by peer.\n");
+
+            // Resume all threads when the debugger detaches
+            bh_arr_each(debug_thread_state_t *, pthread, debug->threads) {
+                resume_thread(*pthread);
+            }
+            return;
+        }
+
         if (bytes_read == -1) {
             switch (errno) {
                 case EAGAIN: break;
 
                 case ECONNRESET:
                     printf("[ERROR] OVM Debugger connection closed by peer.\n");
-                    debug->debug_thread_running = false;
-                    break;
+                    return;
 
                 default:
                     printf("[ERROR] OVM Debugger crashed when reading from UNIX socket.\n");
-                    debug->debug_thread_running = false;
-                    break;
+                    return;
             }
         }
 
@@ -691,9 +673,41 @@ void *__debug_thread_entry(void * data) {
         bh_arena_clear(&debug->tmp_arena);
     }
 
-    close(debug->client_fd);
     printf("[INFO ] Session closed\n");
+}
 
+void *__debug_thread_entry(void * data) {
+    debug_state_t *debug = data;
+    debug->debug_thread_running = true;
+
+    // Set up socket listener
+    // Wait for initial connection/handshake before entering loop.
+
+    debug->listen_socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+
+    struct sockaddr_un local_addr, remote_addr;
+    local_addr.sun_family = AF_UNIX;
+    strcpy(local_addr.sun_path, debug->listen_path); // TODO: Make this dynamic so mulitple servers can exist at a time.
+    unlink(local_addr.sun_path);                     // TODO: Remove this line for the same reason.
+    int len = strlen(local_addr.sun_path) + 1 + sizeof(local_addr.sun_family);
+    bind(debug->listen_socket_fd, (struct sockaddr *)&local_addr, len);
+
+    //
+    // Currently, there can only be 1 connected debugger instance at a time.
+    listen(debug->listen_socket_fd, 16);
+
+    bh_buffer_init(&debug->send_buffer, bh_heap_allocator(), 1024);
+
+    while (debug->debug_thread_running) {
+        len = sizeof(struct sockaddr_un);
+        debug->client_fd = accept(debug->listen_socket_fd, (void * restrict)&remote_addr, (socklen_t * restrict)&len);
+
+        debug_session_handler(debug);
+
+        close(debug->client_fd);
+    }
+
+    close(debug->listen_socket_fd);
     unlink(local_addr.sun_path);
     return NULL;
 }

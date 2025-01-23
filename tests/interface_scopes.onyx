@@ -1,15 +1,16 @@
 use core {*}
 
-Speak :: interface (t: $T) {
+Speak :: interface (T: type_expr) {
+    t as T;
+
     { speak(t, str.{}) } -> void;
     { yell(t, str.{}) } -> void;
 
     speak :: #match {}
 }
 
-#inject Speak {
-    yell  :: #match {}
-}
+Speak.yell  :: #match {}
+
 
 Dog :: struct {_: i32}
 

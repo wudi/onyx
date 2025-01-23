@@ -5,7 +5,7 @@
 // 'structs' in Onyx are very similar to structs in C and C++, with a couple
 // of additional capabilities to make using them even easier.
 
-#load "core/module"
+
 
 use core {*}
 
@@ -159,7 +159,7 @@ main :: (args: [] cstr) {
 
     println("param_struct_instance values:");
     println(param_struct_instance.t_member);
-    for elem: param_struct_instance.array_of_T do printf("{} ", elem);
+    for elem in param_struct_instance.array_of_T do printf("{} ", elem);
     print("\n");
 
 

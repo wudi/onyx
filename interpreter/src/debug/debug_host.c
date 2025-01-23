@@ -9,7 +9,7 @@ void debug_host_init(debug_state_t *debug, struct ovm_engine_t *ovm_engine) {
 
     bh_arena_init(&debug->tmp_arena, bh_heap_allocator(), 16 * 1024);
     debug->tmp_alloc = bh_arena_allocator(&debug->tmp_arena);
-    
+
     debug->info = NULL;
 
     debug->threads = NULL;
@@ -19,7 +19,8 @@ void debug_host_init(debug_state_t *debug, struct ovm_engine_t *ovm_engine) {
     debug->listen_socket_fd = 0;
     debug->client_fd = 0;
 
-    if (pipe(debug->state_change_pipes) != 0) {
+    int *pipes = (int *)debug->state_change_pipes;
+    if (pipe(pipes) != 0) {
         printf("[ERROR] Failed to create thread notification pipes.\n");
     }
 }
@@ -42,10 +43,13 @@ u32 debug_host_register_thread(debug_state_t *debug, ovm_state_t *ovm_state) {
     new_thread->state = debug_state_starting;
     new_thread->ovm_state = ovm_state;
     new_thread->run_count = 0;                    // Start threads in stopped state.
-    sem_init(&new_thread->wait_semaphore, 0, 0);
 
     u32 id = debug->next_thread_id++;
     new_thread->id = id;
+
+    char name_buf[256];
+    bh_bprintf(name_buf, 256, "/ovm_thread_%d", new_thread->id);
+    new_thread->wait_semaphore = semaphore_create(name_buf, O_CREAT, 0664, 0);
 
     new_thread->state_change_write_fd = debug->state_change_pipes[1];
 

@@ -1,0 +1,2 @@
+{ Apple => "This is apple.", Banana => "This is banana.", Orange => "This is orange." }
+{ Apple => "This is apple 64.", Banana => "This is banana 64.", Orange => "This is orange 64." }

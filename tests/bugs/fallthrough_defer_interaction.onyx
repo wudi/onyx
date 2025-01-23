@@ -1,11 +1,11 @@
-#load "core/module"
+
 
 use core {*}
 
 custom_iterator :: () -> Iterator(i32) {
 
-    next :: (data: rawptr) -> (i32, bool) {
-        return 1234, true;
+    next :: (data: rawptr) -> ? i32 {
+        return 1234;
     }
 
     close :: (data: rawptr) {
@@ -26,7 +26,7 @@ main :: (args: [] cstr) {
 
         case 10 {
             count := 5;
-            for i: custom_iterator() {
+            for i in custom_iterator() {
                 println(i);
                 defer println("World");
 
@@ -37,7 +37,7 @@ main :: (args: [] cstr) {
             }
         }
 
-        case #default {
+        case _ {
             println("Default case");
         }
     }

@@ -1,25 +1,25 @@
 package core.hash
 
+use core.intrinsics.types {type_is_enum}
+
 //
 // DEPRECATED: to_u32 is the old name that kind of
 // makes sense, but is a little unintuitive. Use
 // core.hash.hash instead.
 to_u32 :: hash
 
-#doc """
-    This overloaded procedure defines how to hash something.
-    It is used throughout the standard library to hash values.
-    There are many overloads to it in the standard library, and
-    more can be added using #overload.
-
-    Alternatively, a hash method can be defined for a structure or distinct type.
-   
-        Person :: struct {
-            hash :: (p: Person) -> u32 {
-                return // ...
-            }
-        }
-"""
+/// This overloaded procedure defines how to hash something.
+/// It is used throughout the standard library to hash values.
+/// There are many overloads to it in the standard library, and
+/// more can be added using #overload.
+///
+/// Alternatively, a hash method can be defined for a structure or distinct type.
+///
+///     Person :: struct {
+///         hash :: (p: Person) -> u32 {
+///             return // ...
+///         }
+///     }
 hash :: #match -> u32 {
     // Does this need to have a higher precedence value?
     // Because if I wanted to have a custom type as the key
@@ -35,11 +35,15 @@ hash :: #match -> u32 {
     (key: i64)    -> u32 { return cast(u32) (cast(u64) 0xcbf29ce7 ^ cast(u64) key); },
     (key: str)    -> u32 {
         hash: u32 = 5381;
-        for ch: key do hash += (hash << 5) + ~~ch;
+        for ch in key do hash += (hash << 5) + ~~ch;
         return hash;
     },
     (key: type_expr) -> u32 { return hash(cast(u32) key); },
     (key: bool)   -> u32 { return 1 if key else 0; },
+
+    (key: $T/type_is_enum) -> u32 {
+        return hash(cast(T.__backing_type) key);
+    },
 
     #order 10000
     macro (key: $T/HasHashMethod) => key->hash()
@@ -49,12 +53,14 @@ hash :: #match -> u32 {
 // Interface that holds true when the type has a hash() overload defined.
 // Useful in datastructure when the ability to hash is dependent on whether
 // the stored type is hashable. See core/container/pair.onyx for an example.
-Hashable :: interface (t: $T) {
+Hashable :: interface (T: type_expr) {
+    t as T;
     { hash(t) } -> u32;
 }
 
 #local
-HasHashMethod :: interface (t: $T) {
+HasHashMethod :: interface (T: type_expr) {
+    t as T;
     { t->hash() } -> u32;
 }
 

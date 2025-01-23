@@ -7,7 +7,8 @@ use core.net {
     SocketOption,
     SocketAddress,
     SocketShutdown,
-    SocketStatus
+    SocketStatus,
+    ResolveResult
 }
 use core {Result, string, io}
 
@@ -41,19 +42,19 @@ __net_sock_opt_size :: (s: SocketData, sockopt: SocketOption, size: i64) -> bool
 
 __net_sock_bind :: (s: SocketData, addr: &SocketAddress) -> bool {
     switch *addr {
-        case &path: .Unix {
+        case .Unix as &path {
             return __net_bind_unix(s, ~~path);
         }
 
-        case ipv4: .Inet {
+        case .Inet as ipv4 {
             return __net_bind_ipv4(s, ipv4.addr, ipv4.port);
         }
 
-        case host: .HostPort {
+        case .HostPort as host {
             return __net_bind_host(s, host.host, host.port);
         }
 
-        case #default do return false;
+        case _ do return false;
     }
 }
 
@@ -84,22 +85,22 @@ __net_sock_accept :: (s: SocketData, out: &SocketAddress) -> Result(SocketData, 
 
 __net_sock_connect :: (s: SocketData, addr: &SocketAddress) -> io.Error {
     switch *addr {
-        case &path: .Unix {
+        case .Unix as &path {
             return __net_connect_unix(s, ~~path)
                 |> translate_error();
         }
 
-        case i: .Inet {
+        case .Inet as i {
             return __net_connect_ipv4(s, i.addr, i.port)
                 |> translate_error();
         }
 
-        case i: .Inet6 {
+        case .Inet6 as i {
             return __net_connect_ipv6(s, i.addr, i.port)
                 |> translate_error();
         }
 
-        case h: .HostPort {
+        case .HostPort as h {
             return __net_connect_host(s, h.host, h.port)
                 |> translate_error();
         }
@@ -108,7 +109,7 @@ __net_sock_connect :: (s: SocketData, addr: &SocketAddress) -> io.Error {
     translate_error :: (s: SocketError) => switch s {
         case .None => io.Error.None;
         case .ConnectFailed => .ConnectFailed;
-        case #default => .OperationFailed;
+        case _ => .OperationFailed;
     }
 }
 
@@ -117,7 +118,7 @@ __net_sock_recv_from :: (s: SocketData, buf: [] u8, out: &SocketAddress) -> Resu
     addr_len := 512;
 
     recieved := __net_recvfrom(s, buf, &addr_buf, &addr_len);
-    if recieved == 0 || recieved == -1
+    if recieved == -1
     {
         return .{ Err = .EOF };
     }
@@ -135,13 +136,13 @@ __net_sock_recv_from :: (s: SocketData, buf: [] u8, out: &SocketAddress) -> Resu
 
 __net_sock_send_to :: (s: SocketData, buf: [] u8, addr: &SocketAddress) -> Result(i32, io.Error) {
     sent := switch *addr {
-        case &path: .Unix => __net_sendto_unix(s, buf, ~~path);
-        case i: .Inet     => __net_sendto_ipv4(s, buf, i.addr, i.port);
-        case i: .Inet6    => __net_sendto_ipv6(s, buf, i.addr, i.port);
-        case h: .HostPort => __net_sendto_host(s, buf, h.host, h.port);
+        case .Unix as &path => __net_sendto_unix(s, buf, ~~path);
+        case .Inet as i     => __net_sendto_ipv4(s, buf, i.addr, i.port);
+        case .Inet6 as i    => __net_sendto_ipv6(s, buf, i.addr, i.port);
+        case .HostPort as h => __net_sendto_host(s, buf, h.host, h.port);
     };
 
-    if sent == 0 || sent == -1
+    if sent == -1
     {
         // If there was an error sending data, call the connection closed.
         return .{ Err = .EOF };
@@ -175,7 +176,7 @@ __net_sock_recv :: (s: SocketData, buf: [] u8) -> Result(i32, io.Error) {
 
 __net_sock_send :: (s: SocketData, buf: [] u8) -> Result(i32, io.Error) {
     sent := __net_send(s, buf);
-    if sent == 0 || sent == -1
+    if sent == -1
     {
         // If there was an error sending data, call the connection closed.
         return .{ Err = .EOF };
@@ -203,8 +204,45 @@ __net_sock_close :: (s: SocketData) -> void {
     __net_close_socket(s);
 }
 
-__net_resolve :: (host: str, port: u16, out_addrs: [] SocketAddress) -> i32 {
+__net_resolve :: (host: str, port: u16, out_addrs: [] ResolveResult) -> i32 {
+    host_str      := string.to_cstr_on_stack(host);
+    original_info := __net_resolve_start(host_str, port);
 
+    data: [512] u8;
+
+    out_len := 0;
+
+    info := original_info;
+    while out_len < out_addrs.count; info != 0 {
+        info = __net_resolve_next(info, data);
+
+        family  := *cast(& SocketFamily) &data[0]; // Do we need to transfer the family?
+        type    := *cast(& SocketType)   &data[4];
+        proto   := *cast(& SocketProto)  &data[8];
+
+        addr := switch family {
+            case .Inet => do {
+                addr_in: &sockaddr_in_t = ~~&data[12];
+                return SocketAddress.{ Inet = .{ beu16_to_leu16(addr_in.port), addr_in.addr } };
+            }
+
+            case .Inet6 => do {
+                addr_in6: &sockaddr_in6_t = ~~&data[12];
+                return SocketAddress.{ Inet6 = .{ beu16_to_leu16(addr_in6.port), addr_in6.addr } };
+            }
+
+            case .Unix => do {
+                addr_un: &sockaddr_un_t = ~~&data[12];
+                return SocketAddress.{ Unix = addr_un.path };
+            }
+        };
+
+        out_addrs[out_len] = .{ family, type, proto, addr };
+        out_len += 1;
+    }
+
+    __net_resolve_end(original_info);
+    return out_len;
 }
 
 
@@ -246,12 +284,12 @@ __net_resolve :: (host: str, port: u16, out_addrs: [] SocketAddress) -> i32 {
 
             case 2 {
                 addr_in: &sockaddr_in_t = ~~addr;
-                *out = .{ Inet = .{ addr_in.port, addr_in.addr } };
+                *out = .{ Inet = .{ beu16_to_leu16(addr_in.port), addr_in.addr } };
             }
 
-            case 10 {
+            case 10, 30 {
                 addr_in6: &sockaddr_in6_t = ~~addr;
-                *out = .{ Inet6 = .{ addr_in6.port, addr_in6.addr } };
+                *out = .{ Inet6 = .{ beu16_to_leu16(addr_in6.port), addr_in6.addr } };
             }
         }
     }
@@ -283,5 +321,16 @@ __net_resolve :: (host: str, port: u16, out_addrs: [] SocketAddress) -> i32 {
         __net_recvfrom      :: (handle: SocketData, data: [] u8, out_buf: rawptr, out_len: &i32) -> i32 ---
 
         __net_setting_flag  :: (handle: SocketData, setting: SocketOption, value: bool) -> void ---
+
+        __net_resolve_start :: (host: cstr, port: u16) -> u64 ---
+        __net_resolve_next  :: (info: u64, buf: [] u8) -> u64 ---
+        __net_resolve_end   :: (original_info: u64) -> void ---
+    }
+
+    beu16_to_leu16 :: (x: u16) -> u16 {
+        lo := x & 0xff;
+        hi := (x & 0xff00) >> 8;
+
+        return hi | (lo << 8);
     }
 }

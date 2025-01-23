@@ -152,8 +152,8 @@ __random_get :: (buf: [] u8) {
 
 PollDescription :: struct {
     fd: wasi.FileDescriptor;
-    in: core.io.PollEvent;
-    out: core.io.PollEvent;
+    in_events: core.io.PollEvent;
+    out_events: core.io.PollEvent;
 }
 
 __poll :: (fds: [] PollDescription, timeout: i32) -> void {
@@ -167,9 +167,9 @@ __poll :: (fds: [] PollDescription, timeout: i32) -> void {
     }
 
     subs := core.alloc.array_from_stack(wasi.Subscription, count);
-    for i: fds.count {
+    for i in fds.count {
         subs[i].userdata = ~~ i;
-        subs[i].u.tag = switch fds[i].in {
+        subs[i].u.tag = switch fds[i].in_events {
             case .None => .FDRead;
             case .Read => .FDRead;
             case .Write => .FDWrite;
@@ -195,20 +195,33 @@ __poll :: (fds: [] PollDescription, timeout: i32) -> void {
     if error_code != .Success do return;
 
     if number_of_events == 0 do return;
-    for ev: events[0 .. number_of_events] {
+    for ev in events[0 .. number_of_events] {
         if ev.type !=.Clock {
             if ev.fd_readwrite.nbytes > 0 {
                 i := cast(i32) ev.userdata;
-                fds[i].out = fds[i].in;
+                fds[i].out_events = fds[i].in_events;
             }
 
             if ev.fd_readwrite.flags & .ReadWriteHangUp {
                 i := cast(i32) ev.userdata;
-                fds[i].out = .Closed;
+                fds[i].out_events = .Closed;
             }
         }
     }
 }
+
+__args :: (allocator: Allocator) -> [] cstr {
+    args : [] cstr;
+    argv_buf_size : i32;
+    args_sizes_get(&args.count, &argv_buf_size);
+
+    args = make([] cstr, args.count, allocator);
+    argv_buf := cast([&] u8) allocator->alloc(argv_buf_size);
+    args_get(args.data, argv_buf);
+
+    return args;
+}
+
 
 
 // Sets up everything needed for execution.
@@ -216,32 +229,11 @@ __start :: () {
     __runtime_initialize();
     context.thread_id = 0;
 
-    #if (typeof MAIN_PKG.main) == #type () -> void {
+    #if (typeof MAIN_PKG.main) == (#type () -> void) {
         MAIN_PKG.main();
 
     } else {
-        args : [] cstr;
-        argv_buf_size : Size;
-        args_sizes_get(&args.count, &argv_buf_size);
-
-        args = core.memory.make_slice(cstr, args.count);
-        argv_buf := cast(cstr) calloc(argv_buf_size);
-        args_get(args.data, argv_buf);
-
-
-        // This post processing of the argv array needs to happen if the target is using
-        // 32-bit pointers, instead of 64-bits. Right now, Onyx pointers take up 64-bits,
-        // but in most circumstances, only the lower 32-bits are used. When webassembly
-        // standardizes the 64-bit address space, it will be an easy conversion over.
-        // But for right now, WASI will give the argv array 32-bit pointers, instead of
-        // 64-bit pointers. This loops expands the 32-bit pointers into 64-bit pointers
-        // while not clobbering any of them.
-        while i := cast(i32) (args.count - 1); i >= 0 {
-            defer i -= 1;
-
-            args[i] = cast(cstr) (cast([&] u32) args.data)[i];
-        }
-
+        args := __args(context.allocator);
         MAIN_PKG.main(args);
     }
 

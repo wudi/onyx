@@ -103,17 +103,18 @@ static void *locate_symbol_in_dynamic_library_raw(char *libname, char *sym) {
 
 static void *locate_symbol_in_dynamic_library(LinkLibraryContext *ctx, char *libname, char *sym) {
     char *library_name;
+    bh_allocator alloc = bh_heap_allocator();
 
     #ifdef _BH_LINUX
-    library_name = bh_lookup_file(libname, ".", ".so", 1, (const char **) ctx->library_paths, 1);
+    library_name = bh_lookup_file(libname, ".", ".so", (const char **) ctx->library_paths, NULL, alloc);
     #endif
 
     #ifdef _BH_DARWIN
-    library_name = bh_lookup_file(libname, ".", ".dylib", 1, (const char **) ctx->library_paths, 1);
+    library_name = bh_lookup_file(libname, ".", ".dylib", (const char **) ctx->library_paths, NULL, alloc);
     #endif
 
     #ifdef _BH_WINDOWS
-    library_name = bh_lookup_file(libname, ".", ".dll", 1, (const char **) ctx->library_paths, 1);
+    library_name = bh_lookup_file(libname, ".", ".dll", (const char **) ctx->library_paths, NULL, alloc);
     #endif
 
     return locate_symbol_in_dynamic_library_raw(library_name, sym);
@@ -165,7 +166,7 @@ static void lookup_and_load_custom_libraries(LinkLibraryContext *ctx, bh_arr(Was
         i32 section_start = cursor;
         if (section_number == 0) {
             u64 name_len = uleb128_to_uint(wasm_bytes.data, &cursor);
-            if (!strncmp(wasm_bytes.data + cursor, "_onyx_libs", name_len)) {
+            if (!strncmp((const char *) wasm_bytes.data + cursor, "_onyx_libs", name_len)) {
                 cursor += name_len;
                 u64 lib_count = uleb128_to_uint(wasm_bytes.data, &cursor);
 
@@ -174,7 +175,7 @@ static void lookup_and_load_custom_libraries(LinkLibraryContext *ctx, bh_arr(Was
                     lib_path_length = bh_min(lib_path_length, 512);
 
                     char *lib_path = malloc(lib_path_length);
-                    strncpy(lib_path, wasm_bytes.data + cursor, lib_path_length);
+                    strncpy(lib_path, (const char *) wasm_bytes.data + cursor, lib_path_length);
                     lib_path[lib_path_length] = '\0';
                     bh_path_convert_separators(lib_path);
                     cursor += lib_path_length;
@@ -189,7 +190,7 @@ static void lookup_and_load_custom_libraries(LinkLibraryContext *ctx, bh_arr(Was
                     lib_name_length = bh_min(lib_name_length, 256);
 
                     char library_name[256];
-                    strncpy(library_name, wasm_bytes.data + cursor, lib_name_length);
+                    strncpy(library_name, (const char *) wasm_bytes.data + cursor, lib_name_length);
                     library_name[lib_name_length] = '\0';
                     cursor += lib_name_length;
 
@@ -241,7 +242,7 @@ static wasm_trap_t *__wasm_dyncall(void *env, const wasm_val_vec_t *args, wasm_v
                 dcArgInt(dcCallVM, args->data[arg_idx++].of.i32);
                 break;
 
-            default: assert(("bad dynamic call type", 0));
+            default: assert("bad dynamic call type" && 0);
         }
     }
 
@@ -384,12 +385,39 @@ static void (* wasm_func_from_idx(wasm_table_t *func_table, unsigned int index, 
 
 #endif // USE_DYNCALL
 
+static char *lookup_func_name_in_name_section(u32 funcidx, i32 name_section, i32 *out_len) {
+    if (name_section == 0) return NULL;
+
+    i32 cursor = name_section;
+
+    // This is not the most robust checking, since there are other name
+    // subsections that could come before the func section. For the
+    // moment, Onyx only produces the func subsection in output_name_section.
+    u32 name_kind = uleb128_to_uint(wasm_raw_bytes.data, &cursor);
+    if (name_kind == 1) {
+        u32 func_count = uleb128_to_uint(wasm_raw_bytes.data, &cursor);
+        fori (i, 0, func_count) {
+            u32 idx = uleb128_to_uint(wasm_raw_bytes.data, &cursor);
+            u32 len = uleb128_to_uint(wasm_raw_bytes.data, &cursor);
+
+            if (idx == funcidx) {
+                *out_len = len;
+                return &wasm_raw_bytes.data[cursor];
+            }
+
+            cursor += len;
+        }
+    }
+
+    return NULL;
+}
+
 static void onyx_print_trap(wasm_trap_t* trap) {
     wasm_message_t msg;
     wasm_trap_message(trap, &msg);
     bh_printf("TRAP: %b\n", msg.data, msg.size);
 
-    i32 func_name_section = 0;
+    i32 name_section = 0;
 
     i32 cursor = 8; // skip the magic number and version
     while (cursor < wasm_raw_bytes.length) {
@@ -399,9 +427,9 @@ static void onyx_print_trap(wasm_trap_t* trap) {
         i32 section_start = cursor;
         if (section_number == 0) {
             u64 name_len = uleb128_to_uint(wasm_raw_bytes.data, &cursor);
-            if (!strncmp(wasm_raw_bytes.data + cursor, "_onyx_func_offsets", name_len)) {
+            if (!strncmp((const char *) wasm_raw_bytes.data + cursor, "name", name_len)) {
                 cursor += name_len;
-                func_name_section = cursor;
+                name_section = cursor;
                 break;
             }
         }
@@ -413,17 +441,16 @@ static void onyx_print_trap(wasm_trap_t* trap) {
     wasm_frame_vec_t frames;
     wasm_trap_trace(trap, &frames);
     fori (i, 0, (i32) frames.size) {
-        i32 func_idx   = wasm_frame_func_index(frames.data[i]);
+        u32 func_idx   = wasm_frame_func_index(frames.data[i]);
         i32 mod_offset = wasm_frame_module_offset(frames.data[i]);
 
-        if (func_name_section > 0) {
-            i32 cursor = func_name_section + 4 * func_idx;
-            i32 func_offset = *(i32 *) (wasm_raw_bytes.data + cursor);
-            char* func_name = wasm_raw_bytes.data + func_name_section + func_offset;
+        i32   func_name_length;
+        char* func_name = lookup_func_name_in_name_section(func_idx, name_section, &func_name_length);
 
-            bh_printf("    func[%d]:%p at %s\n", func_idx, mod_offset, func_name);
+        if (func_name) {
+            bh_printf("    func[%d]:%p at %b\n", func_idx, mod_offset, func_name, func_name_length);
         } else {
-            bh_printf("    func[%d]\n", func_idx);
+            bh_printf("    func[%d]:%p\n", func_idx, mod_offset);
         }
     }
 }
@@ -436,7 +463,7 @@ static void cleanup_wasm_objects() {
 }
 
 static wasm_trap_t *__error_on_call(void *env, const wasm_val_vec_t *args, wasm_val_vec_t *results) {
-    printf("Attempted to invoke imported function with no defintion, '%s'\n", (char *) env);
+    printf("[ERROR] Attempted to invoke imported function with no definition, '%s'\n", (char *) env);
     exit(1);
     return NULL;
 }
@@ -545,16 +572,15 @@ static b32 link_wasm_imports(
         wasm_imports.data[i] = import;
         continue;
 
-
     bad_import:
-        bh_printf("Couldn't find import %b.%b.\n", module_name->data, module_name->size, import_name->data, import_name->size);
+        bh_printf("Unable to find import '%b.%b'.\n", module_name->data, module_name->size, import_name->data, import_name->size);
         return 0;
     }
 
     return 1;
 }
 
-void onyx_run_initialize(b32 debug_enabled) {
+void onyx_run_initialize(b32 debug_enabled, const char *debug_socket) {
     wasm_config = wasm_config_new();
     if (!wasm_config) {
         cleanup_wasm_objects();
@@ -564,6 +590,23 @@ void onyx_run_initialize(b32 debug_enabled) {
 #ifdef USE_OVM_DEBUGGER
     void wasm_config_enable_debug(wasm_config_t *config, int value);
     wasm_config_enable_debug(wasm_config, debug_enabled);
+
+    #if defined(_BH_LINUX) || defined(_BH_DARWIN)
+        i32 getpid();
+        i32 pid = getpid();
+
+        const char *socket_path = NULL;
+        if (debug_socket != NULL) {
+            socket_path = debug_socket;
+
+        } else {
+            char *env_path = getenv("ONYX_PATH");
+            socket_path = bh_aprintf(bh_heap_allocator(), "%s/debug.%d", env_path, pid);
+        }
+
+        void wasm_config_set_listen_path(wasm_config_t *config, const char *listen_path);
+        wasm_config_set_listen_path(wasm_config, socket_path);
+    #endif
 #endif
 
 #ifndef USE_OVM_DEBUGGER
@@ -602,7 +645,7 @@ void onyx_run_initialize(b32 debug_enabled) {
     wasm_runtime.onyx_print_trap = &onyx_print_trap;
 }
 
-b32 onyx_run_wasm(bh_buffer wasm_bytes, int argc, char *argv[]) {
+b32 onyx_run_wasm_code(bh_buffer wasm_bytes, int argc, char *argv[]) {
     runtime = &wasm_runtime;
     wasm_raw_bytes = wasm_bytes;
 
@@ -616,7 +659,7 @@ b32 onyx_run_wasm(bh_buffer wasm_bytes, int argc, char *argv[]) {
 
     wasm_byte_vec_t wasm_data;
     wasm_data.size = wasm_bytes.length;
-    wasm_data.data = wasm_bytes.data;
+    wasm_data.data = (wasm_byte_t *) wasm_bytes.data;
 
     wasm_module = wasm_module_new(wasm_store, &wasm_data);
     if (!wasm_module) {
@@ -652,7 +695,7 @@ b32 onyx_run_wasm(bh_buffer wasm_bytes, int argc, char *argv[]) {
 #ifdef USE_DYNCALL
     wasm_runtime.wasm_func_from_idx = wasm_func_from_idx;
 #endif
-    
+
     wasm_runtime.argc = argc;
     wasm_runtime.argv = argv;
 

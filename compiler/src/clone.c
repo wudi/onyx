@@ -2,13 +2,10 @@
 #include "parser.h"
 #include "utils.h"
 
-// Weird flags that shouldn't be used too often because they complicate things
-static b32 dont_copy_structs = 0;
-
-static inline b32 should_clone(AstNode* node) {
+static inline b32 should_clone(Context *context, AstNode* node) {
     if (node->flags & Ast_Flag_No_Clone) return 0;
 
-    if (dont_copy_structs) {
+    if (context->cloner.dont_copy_structs) {
         if (node->kind == Ast_Kind_Struct_Type) return 0;
         if (node->kind == Ast_Kind_Function)    return 0;
         if (node->kind == Ast_Kind_Polymorphic_Proc) return 0;
@@ -122,34 +119,34 @@ static inline i32 ast_kind_to_size(AstNode* node) {
         case Ast_Kind_Capture_Local: return sizeof(AstCaptureLocal);
         case Ast_Kind_Union_Type: return sizeof(AstUnionType);
         case Ast_Kind_Union_Variant: return sizeof(AstUnionVariant);
-        case Ast_Kind_Count: return 0;
+        case Ast_Kind_Procedural_Expansion: return sizeof(AstProceduralExpansion);
+
+        default: break;
     }
 
     return 0;
 }
 
-static bh_arr(AstNode *) captured_entities=NULL;
+AstNode* ast_clone_with_captured_entities(Context *context, void* n, bh_arr(AstNode *)* ents) {
+    context->cloner.captured_entities = *ents;
 
-AstNode* ast_clone_with_captured_entities(bh_allocator a, void* n, bh_arr(AstNode *)* ents) {
-    captured_entities = *ents;
+    AstNode* cloned = ast_clone(context, n);
 
-    AstNode* cloned = ast_clone(a, n);
-
-    *ents = captured_entities;
-    captured_entities = NULL;
+    *ents = context->cloner.captured_entities;
+    context->cloner.captured_entities = NULL;
     return cloned;
 }
 
-AstNode* ast_clone_list(bh_allocator a, void* n) {
+AstNode* ast_clone_list(Context *context, void* n) {
     AstNode* node = (AstNode *) n;
     if (node == NULL) return NULL;
 
-    AstNode* root = ast_clone(a, node);
+    AstNode* root = ast_clone(context, node);
     AstNode* curr = root->next;
     AstNode** insertion = &root->next;
 
     while (curr != NULL) {
-        curr = ast_clone(a, curr);
+        curr = ast_clone(context, curr);
         *insertion = curr;
         insertion = &curr->next;
         curr = curr->next;
@@ -159,29 +156,30 @@ AstNode* ast_clone_list(bh_allocator a, void* n) {
 }
 
 #define E(ent) do { \
-    assert(captured_entities); \
+    assert(context->cloner.captured_entities); \
     ent->entity = NULL; \
-    bh_arr_push(captured_entities, (AstNode *) ent); \
+    bh_arr_push(context->cloner.captured_entities, (AstNode *) ent); \
     } while (0);
     
 
-#define C(nt, mname) ((nt *) nn)->mname = (void *) ast_clone(a, ((nt *) node)->mname);
+#define C(nt, mname) ((nt *) nn)->mname = (void *) ast_clone(context, ((nt *) node)->mname);
 
 // NOTE: Using void* to avoid a lot of unnecessary casting
-AstNode* ast_clone(bh_allocator a, void* n) {
+AstNode* ast_clone(Context *context, void* n) {
     AstNode* node = (AstNode *) n;
 
     if (node == NULL) return NULL;
-    if (!should_clone(node)) return node;
+    if (!should_clone(context, node)) return node;
 
-    static int clone_depth = 0;
-    clone_depth++;
+    context->cloner.clone_depth++;
 
     i32 node_size = ast_kind_to_size(node);
     // bh_printf("Cloning %s with size %d\n", onyx_ast_node_kind_string(node->kind), node_size);
 
-    AstNode* nn = onyx_ast_node_new(a, node_size, node->kind);
+    AstNode* nn = onyx_ast_node_new(context->ast_alloc, node_size, node->kind);
     memmove(nn, node, node_size);
+
+    nn->flags &= ~(Ast_Flag_Has_Been_Checked | Ast_Flag_Has_Been_Symres);
 
     switch ((u16) node->kind) {
         case Ast_Kind_Binary_Op:
@@ -203,7 +201,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
 
         case Ast_Kind_Call:
             C(AstCall, callee);
-            arguments_deep_clone(a, &((AstCall *) nn)->args, &((AstCall *) node)->args);
+            arguments_deep_clone(context, &((AstCall *) nn)->args, &((AstCall *) node)->args);
             break;
 
         case Ast_Kind_Argument:
@@ -240,9 +238,9 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstStructLiteral* st = (AstStructLiteral *) node;
             AstStructLiteral* dt = (AstStructLiteral *) nn;
 
-            dt->stnode = (AstTyped *) ast_clone(a, st->stnode);
+            dt->stnode = (AstTyped *) ast_clone(context, st->stnode);
 
-            arguments_deep_clone(a, &dt->args, &st->args);
+            arguments_deep_clone(context, &dt->args, &st->args);
             break;
         }
 
@@ -250,12 +248,12 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstArrayLiteral* st = (AstArrayLiteral *) node;
             AstArrayLiteral* dt = (AstArrayLiteral *) nn;
 
-            dt->atnode = (AstTyped *) ast_clone(a, st->atnode);
+            dt->atnode = (AstTyped *) ast_clone(context, st->atnode);
 
             dt->values = NULL;
-            bh_arr_new(global_heap_allocator, dt->values, bh_arr_length(st->values));
+            bh_arr_new(context->gp_alloc, dt->values, bh_arr_length(st->values));
             bh_arr_each(AstTyped *, val, st->values)
-                bh_arr_push(dt->values, (AstTyped *) ast_clone(a, *val));
+                bh_arr_push(dt->values, (AstTyped *) ast_clone(context, *val));
 
             break;
         }
@@ -271,7 +269,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             break;
 
         case Ast_Kind_Block:
-            ((AstBlock *) nn)->body = ast_clone_list(a, ((AstBlock *) node)->body);
+            ((AstBlock *) nn)->body = ast_clone_list(context, ((AstBlock *) node)->body);
             ((AstBlock *) nn)->quoted_block_capture_scope = NULL;
             break;
 
@@ -279,15 +277,22 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             C(AstDefer, stmt);
             break;
 
-        case Ast_Kind_For:
-            C(AstFor, var);
+        case Ast_Kind_For: {
+            AstFor* sf = (AstFor *) node;
+            AstFor* df = (AstFor *) nn;
+
+            df->indexing_variables = NULL;
+            bh_arr_new(context->gp_alloc, df->indexing_variables, bh_arr_length(sf->indexing_variables));
+            bh_arr_each(AstLocal *, iv, sf->indexing_variables)
+                bh_arr_push(df->indexing_variables, (AstLocal *) ast_clone(context, (AstTyped *) *iv));
+
             C(AstFor, iter);
-            C(AstFor, stmt);
             break;
+        }
 
         case Ast_Kind_If:
         case Ast_Kind_While:
-            ((AstIfWhile *) nn)->initialization = ast_clone_list(a, ((AstIfWhile *) node)->initialization);
+            ((AstIfWhile *) nn)->initialization = ast_clone_list(context, ((AstIfWhile *) node)->initialization);
             //fallthrough
 
         case Ast_Kind_Static_If:
@@ -315,9 +320,9 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstSwitchCase *sw = (AstSwitchCase *) node;
 
             dw->values = NULL;
-            bh_arr_new(global_heap_allocator, dw->values, bh_arr_length(sw->values));
+            bh_arr_new(context->gp_alloc, dw->values, bh_arr_length(sw->values));
             bh_arr_each(AstTyped *, value, sw->values)
-                bh_arr_push(dw->values, (AstTyped *) ast_clone(a, *value));
+                bh_arr_push(dw->values, (AstTyped *) ast_clone(context, *value));
 
             break;
         }
@@ -326,7 +331,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstSwitch* dw = (AstSwitch *) nn;
             AstSwitch* sw = (AstSwitch *) node;
 
-            dw->initialization = ast_clone_list(a, sw->initialization);
+            dw->initialization = ast_clone_list(context, sw->initialization);
             C(AstSwitch, expr);
 
 
@@ -369,24 +374,24 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstStructType* ss = (AstStructType *) node;
 
             ds->members = NULL;
-            bh_arr_new(global_heap_allocator, ds->members, bh_arr_length(ss->members));
+            bh_arr_new(context->gp_alloc, ds->members, bh_arr_length(ss->members));
 
             bh_arr_each(AstStructMember *, smem, ss->members) {
-                bh_arr_push(ds->members, (AstStructMember *) ast_clone(a, *smem));
+                bh_arr_push(ds->members, (AstStructMember *) ast_clone(context, *smem));
             }
 
             ds->meta_tags = NULL;
-            bh_arr_new(global_heap_allocator, ds->meta_tags, bh_arr_length(ss->meta_tags));
+            bh_arr_new(context->gp_alloc, ds->meta_tags, bh_arr_length(ss->meta_tags));
             bh_arr_each(AstTyped *, tag, ss->meta_tags) {
-                bh_arr_push(ds->meta_tags, (AstTyped *) ast_clone(a, *tag));
+                bh_arr_push(ds->meta_tags, (AstTyped *) ast_clone(context, *tag));
             }
             
             if (ss->constraints.constraints) {
                 memset(&ds->constraints, 0, sizeof(ConstraintContext));
-                bh_arr_new(global_heap_allocator, ds->constraints.constraints, bh_arr_length(ss->constraints.constraints));
+                bh_arr_new(context->gp_alloc, ds->constraints.constraints, bh_arr_length(ss->constraints.constraints));
 
                 bh_arr_each(AstConstraint *, constraint, ss->constraints.constraints) {
-                    bh_arr_push(ds->constraints.constraints, (AstConstraint *) ast_clone(a, (AstNode *) *constraint));
+                    bh_arr_push(ds->constraints.constraints, (AstConstraint *) ast_clone(context, (AstNode *) *constraint));
                 }
             }
 
@@ -402,9 +407,9 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstStructMember *ss = (AstStructMember *) node;
 
             ds->meta_tags = NULL;
-            bh_arr_new(global_heap_allocator, ds->meta_tags, bh_arr_length(ss->meta_tags));
+            bh_arr_new(context->gp_alloc, ds->meta_tags, bh_arr_length(ss->meta_tags));
             bh_arr_each(AstTyped *, tag, ss->meta_tags) {
-                bh_arr_push(ds->meta_tags, (AstTyped *) ast_clone(a, *tag));
+                bh_arr_push(ds->meta_tags, (AstTyped *) ast_clone(context, *tag));
             }
 
             break;
@@ -415,24 +420,24 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstUnionType* su = (AstUnionType *) node;
 
             du->variants = NULL;
-            bh_arr_new(global_heap_allocator, du->variants, bh_arr_length(su->variants));
+            bh_arr_new(context->gp_alloc, du->variants, bh_arr_length(su->variants));
 
             bh_arr_each(AstUnionVariant *, uv, su->variants) {
-                bh_arr_push(du->variants, (AstUnionVariant *) ast_clone(a, *uv));
+                bh_arr_push(du->variants, (AstUnionVariant *) ast_clone(context, *uv));
             }
 
             du->meta_tags = NULL;
-            bh_arr_new(global_heap_allocator, du->meta_tags, bh_arr_length(su->meta_tags));
+            bh_arr_new(context->gp_alloc, du->meta_tags, bh_arr_length(su->meta_tags));
             bh_arr_each(AstTyped *, tag, su->meta_tags) {
-                bh_arr_push(du->meta_tags, (AstTyped *) ast_clone(a, *tag));
+                bh_arr_push(du->meta_tags, (AstTyped *) ast_clone(context, *tag));
             }
             
             if (su->constraints.constraints) {
                 memset(&du->constraints, 0, sizeof(ConstraintContext));
-                bh_arr_new(global_heap_allocator, du->constraints.constraints, bh_arr_length(su->constraints.constraints));
+                bh_arr_new(context->gp_alloc, du->constraints.constraints, bh_arr_length(su->constraints.constraints));
 
                 bh_arr_each(AstConstraint *, constraint, su->constraints.constraints) {
-                    bh_arr_push(du->constraints.constraints, (AstConstraint *) ast_clone(a, (AstNode *) *constraint));
+                    bh_arr_push(du->constraints.constraints, (AstConstraint *) ast_clone(context, (AstNode *) *constraint));
                 }
             }
 
@@ -447,9 +452,9 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstUnionVariant *su = (AstUnionVariant *) node;
 
             du->meta_tags = NULL;
-            bh_arr_new(global_heap_allocator, du->meta_tags, bh_arr_length(su->meta_tags));
+            bh_arr_new(context->gp_alloc, du->meta_tags, bh_arr_length(su->meta_tags));
             bh_arr_each(AstTyped *, tag, su->meta_tags) {
-                bh_arr_push(du->meta_tags, (AstTyped *) ast_clone(a, *tag));
+                bh_arr_push(du->meta_tags, (AstTyped *) ast_clone(context, *tag));
             }
 
             break;
@@ -459,12 +464,12 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstPolyCallType* pcd = (AstPolyCallType *) nn;
             AstPolyCallType* pcs = (AstPolyCallType *) node;
 
-            pcd->callee = (AstType *) ast_clone(a, pcs->callee);
+            pcd->callee = (AstType *) ast_clone(context, pcs->callee);
             pcd->params = NULL;
-            bh_arr_new(global_heap_allocator, pcd->params, bh_arr_length(pcs->params));
+            bh_arr_new(context->gp_alloc, pcd->params, bh_arr_length(pcs->params));
 
             bh_arr_each(AstNode *, param, pcs->params) {
-                bh_arr_push(pcd->params, ast_clone(a, *param));
+                bh_arr_push(pcd->params, ast_clone(context, *param));
             }
 
             break;
@@ -475,10 +480,10 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstCompoundType* cs = (AstCompoundType *) node;
 
             cd->types = NULL;
-            bh_arr_new(global_heap_allocator, cd->types, bh_arr_length(cs->types));
+            bh_arr_new(context->gp_alloc, cd->types, bh_arr_length(cs->types));
 
             bh_arr_each(AstType *, type, cs->types) {
-                bh_arr_push(cd->types, (AstType *) ast_clone(a, (AstNode *) *type));
+                bh_arr_push(cd->types, (AstType *) ast_clone(context, (AstNode *) *type));
             }
             break;
         }
@@ -487,7 +492,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             C(AstFunctionType, return_type);
             ((AstFunctionType *) nn)->param_count = ((AstFunctionType *) node)->param_count;
             fori (i, 0, (i64) ((AstFunctionType *) nn)->param_count) {
-                ((AstFunctionType *) nn)->params[i] = (AstType *) ast_clone(a, ((AstFunctionType *) node)->params[i]);
+                ((AstFunctionType *) nn)->params[i] = (AstType *) ast_clone(context, ((AstFunctionType *) node)->params[i]);
             }
             break;
 
@@ -503,7 +508,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstFunction* sf = (AstFunction *) node;
 
             // Check if we are cloning a function inside of a function.
-            if (clone_depth > 1) {
+            if (context->cloner.clone_depth > 1) {
                 // If we are, and the inner function has a scope, this means that
                 // the inner function does not capture anything, and is not polymorphic.
                 // Therefore, it should be treated as a normal function and not cloned
@@ -513,7 +518,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
                 // either polymorphic and/or it has captures. In either case, we have
                 // to clone the function internally below.
                 if (df->scope != NULL) {
-                    clone_depth--;
+                    context->cloner.clone_depth--;
                     return node;
                 }
             }
@@ -525,49 +530,57 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             assert(df->scope == NULL);
 
             df->nodes_that_need_entities_after_clone = NULL;
-            bh_arr_new(global_heap_allocator, df->nodes_that_need_entities_after_clone, 1);
+            bh_arr_new(context->gp_alloc, df->nodes_that_need_entities_after_clone, 1);
 
-            bh_arr(AstNode *) old_captured_entities = captured_entities;
-            captured_entities = df->nodes_that_need_entities_after_clone;
+            bh_arr(AstNode *) old_captured_entities = context->cloner.captured_entities;
+            context->cloner.captured_entities = df->nodes_that_need_entities_after_clone;
 
-            df->return_type = (AstType *) ast_clone(a, sf->return_type);
-            df->body = (AstBlock *) ast_clone(a, sf->body);
-            df->captures = (AstCaptureBlock *) ast_clone(a, sf->captures);
+            df->return_type = (AstType *) ast_clone(context, sf->return_type);
+            df->body = (AstBlock *) ast_clone(context, sf->body);
+            df->captures = (AstCaptureBlock *) ast_clone(context, sf->captures);
 
-            df->nodes_that_need_entities_after_clone = captured_entities;
-            captured_entities = old_captured_entities;
+            df->nodes_that_need_entities_after_clone = context->cloner.captured_entities;
+            context->cloner.captured_entities = old_captured_entities;
 
             df->params = NULL;
-            bh_arr_new(context.ast_alloc, df->params, bh_arr_length(sf->params));
+            bh_arr_new(context->ast_alloc, df->params, bh_arr_length(sf->params));
 
             bh_arr_each(AstParam, param, sf->params) {
                 AstParam new_param = { 0 };
 
-                dont_copy_structs = 1;
-                new_param.local = (AstLocal *) ast_clone(a, param->local);
+                context->cloner.dont_copy_structs = 1;
+                new_param.local = (AstLocal *) ast_clone(context, param->local);
                 new_param.local->flags &= ~Ast_Flag_Param_Symbol_Dirty;
-                new_param.default_value = (AstTyped *) ast_clone(a, param->default_value);
+                new_param.default_value = (AstTyped *) ast_clone(context, param->default_value);
                 new_param.use_processed = 0;
-                dont_copy_structs = 0;
+                context->cloner.dont_copy_structs = 0;
 
                 new_param.vararg_kind = param->vararg_kind;
                 new_param.is_used = param->is_used;
                 bh_arr_push(df->params, new_param);
             }
 
+            df->named_return_locals = NULL;
+            if (sf->named_return_locals) {
+                bh_arr_new(context->ast_alloc, df->named_return_locals, bh_arr_length(sf->named_return_locals));
+                bh_arr_each(AstLocal *, named_return, sf->named_return_locals) {
+                    bh_arr_push(df->named_return_locals, (AstLocal *) ast_clone(context, (AstNode *) *named_return));
+                }
+            }
+
             if (sf->constraints.constraints) {
                 memset(&df->constraints, 0, sizeof(ConstraintContext));
-                bh_arr_new(context.ast_alloc, df->constraints.constraints, bh_arr_length(sf->constraints.constraints));
+                bh_arr_new(context->ast_alloc, df->constraints.constraints, bh_arr_length(sf->constraints.constraints));
 
                 bh_arr_each(AstConstraint *, constraint, sf->constraints.constraints) {
-                    bh_arr_push(df->constraints.constraints, (AstConstraint *) ast_clone(a, (AstNode *) *constraint));
+                    bh_arr_push(df->constraints.constraints, (AstConstraint *) ast_clone(context, (AstNode *) *constraint));
                 }
             }
 
             if (sf->tags) {
-                bh_arr_new(context.ast_alloc, df->tags, bh_arr_length(sf->tags));
+                bh_arr_new(context->ast_alloc, df->tags, bh_arr_length(sf->tags));
                 bh_arr_each(AstTyped *, pexpr, sf->tags) {
-                    bh_arr_push(df->tags, (AstTyped *) ast_clone(a, (AstNode *) *pexpr));
+                    bh_arr_push(df->tags, (AstTyped *) ast_clone(context, (AstNode *) *pexpr));
                 }    
             }
 
@@ -575,7 +588,7 @@ AstNode* ast_clone(bh_allocator a, void* n) {
                 df->scope_to_lookup_captured_values = NULL;
             }
 
-            if (clone_depth > 1 && captured_entities) {
+            if (context->cloner.clone_depth > 1 && context->cloner.captured_entities) {
                 sf->flags |= Ast_Flag_Function_Is_Lambda_Inside_PolyProc;
                 df->flags &= ~Ast_Flag_Function_Is_Lambda_Inside_PolyProc;
                 E(df);
@@ -590,11 +603,11 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstConstraint* dc = (AstConstraint *) nn;
             AstConstraint* sc = (AstConstraint *) node;
 
-            dc->type_args = NULL;
-            bh_arr_new(global_heap_allocator, dc->type_args, bh_arr_length(sc->type_args));
+            dc->args = NULL;
+            bh_arr_new(context->gp_alloc, dc->args, bh_arr_length(sc->args));
 
-            bh_arr_each(AstType *, type_arg, sc->type_args) {
-                bh_arr_push(dc->type_args, (AstType *) ast_clone(a, (AstNode *) *type_arg));
+            bh_arr_each(AstTyped *, arg, sc->args) {
+                bh_arr_push(dc->args, (AstTyped *) ast_clone(context, (AstNode *) *arg));
             }
 
             dc->phase = Constraint_Phase_Waiting_To_Be_Queued;
@@ -605,17 +618,17 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstDirectiveSolidify* dd = (AstDirectiveSolidify *) nn;
             AstDirectiveSolidify* sd = (AstDirectiveSolidify *) node;
 
-            dd->poly_proc = (AstFunction *) ast_clone(a, (AstNode *) sd->poly_proc);
+            dd->poly_proc = (AstFunction *) ast_clone(context, (AstNode *) sd->poly_proc);
             dd->resolved_proc = NULL;
 
             dd->known_polyvars = NULL;
-            bh_arr_new(global_heap_allocator, dd->known_polyvars, bh_arr_length(sd->known_polyvars));
+            bh_arr_new(context->gp_alloc, dd->known_polyvars, bh_arr_length(sd->known_polyvars));
 
             bh_arr_each(AstPolySolution, sln, sd->known_polyvars) {
                 AstPolySolution new_sln;
                 new_sln.kind     = sln->kind;
-                new_sln.poly_sym = (AstNode *) ast_clone(a, (AstNode *) sln->poly_sym);
-                new_sln.ast_type = (AstType *) ast_clone(a, (AstNode *) sln->ast_type);
+                new_sln.poly_sym = (AstNode *) ast_clone(context, (AstNode *) sln->poly_sym);
+                new_sln.ast_type = (AstType *) ast_clone(context, (AstNode *) sln->ast_type);
                 bh_arr_push(dd->known_polyvars, new_sln);
             }
 
@@ -627,10 +640,10 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstCompound* cs = (AstCompound *) node;
 
             cd->exprs = NULL;
-            bh_arr_new(global_heap_allocator, cd->exprs, bh_arr_length(cs->exprs));
+            bh_arr_new(context->gp_alloc, cd->exprs, bh_arr_length(cs->exprs));
 
             bh_arr_each(AstTyped *, expr, cs->exprs) {
-                bh_arr_push(cd->exprs, (AstTyped *) ast_clone(a, (AstNode *) *expr));
+                bh_arr_push(cd->exprs, (AstTyped *) ast_clone(context, (AstNode *) *expr));
             }
             break;
         }
@@ -651,10 +664,10 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstDirectiveInsert* id = (AstDirectiveInsert *) nn;
             AstDirectiveInsert* is = (AstDirectiveInsert *) node;
             id->binding_exprs = NULL;
-            bh_arr_new(global_heap_allocator, id->binding_exprs, bh_arr_length(is->binding_exprs));
+            bh_arr_new(context->gp_alloc, id->binding_exprs, bh_arr_length(is->binding_exprs));
 
             bh_arr_each(AstTyped *, expr, is->binding_exprs) {
-                bh_arr_push(id->binding_exprs, (AstTyped *) ast_clone(a, (AstNode *) *expr));
+                bh_arr_push(id->binding_exprs, (AstTyped *) ast_clone(context, (AstNode *) *expr));
             }
             break;
 
@@ -687,10 +700,10 @@ AstNode* ast_clone(bh_allocator a, void* n) {
             AstCaptureBlock* cs = (AstCaptureBlock *) node;
 
             cd->captures = NULL;
-            bh_arr_new(global_heap_allocator, cd->captures, bh_arr_length(cs->captures));
+            bh_arr_new(context->gp_alloc, cd->captures, bh_arr_length(cs->captures));
 
             bh_arr_each(AstCaptureLocal *, expr, cs->captures) {
-                bh_arr_push(cd->captures, (AstCaptureLocal *) ast_clone(a, (AstNode *) *expr));
+                bh_arr_push(cd->captures, (AstCaptureLocal *) ast_clone(context, (AstNode *) *expr));
             }
             break;
         }
@@ -698,38 +711,42 @@ AstNode* ast_clone(bh_allocator a, void* n) {
         case Ast_Kind_Capture_Local:
             C(AstCaptureLocal, type_node);
             break;
+
+        case Ast_Kind_Procedural_Expansion:
+            C(AstProceduralExpansion, proc_macro);
+            break;
     }
 
-    clone_depth--;
+    context->cloner.clone_depth--;
     return nn;
 }
 
 #undef C
 
-AstFunction* clone_function_header(bh_allocator a, AstFunction* func) {
+AstFunction* clone_function_header(Context *context, AstFunction* func) {
     if (func->kind != Ast_Kind_Function && func->kind != Ast_Kind_Polymorphic_Proc) return NULL;
 
     if (func->is_foreign) return func;
 
-    AstFunction* new_func = onyx_ast_node_new(a, sizeof(AstFunction), func->kind);
+    AstFunction* new_func = onyx_ast_node_new(context->ast_alloc, sizeof(AstFunction), func->kind);
     memmove(new_func, func, sizeof(AstFunction));
     assert(new_func->scope == NULL);
 
     convert_polyproc_to_function(new_func);
 
-    new_func->return_type = (AstType *) ast_clone(a, func->return_type);
+    new_func->return_type = (AstType *) ast_clone(context, func->return_type);
 
     new_func->params = NULL;
-    bh_arr_new(global_heap_allocator, new_func->params, bh_arr_length(func->params));
+    bh_arr_new(context->gp_alloc, new_func->params, bh_arr_length(func->params));
     bh_arr_each(AstParam, param, func->params) {
         AstParam new_param;
 
-        dont_copy_structs = 1;
-        new_param.local = (AstLocal *) ast_clone(a, param->local);
+        context->cloner.dont_copy_structs = 1;
+        new_param.local = (AstLocal *) ast_clone(context, param->local);
         new_param.local->flags &= ~Ast_Flag_Param_Symbol_Dirty;
-        new_param.default_value = (AstTyped *) ast_clone(a, param->default_value);
+        new_param.default_value = (AstTyped *) ast_clone(context, param->default_value);
         new_param.use_processed = 0;
-        dont_copy_structs = 0;
+        context->cloner.dont_copy_structs = 0;
 
         new_param.vararg_kind = param->vararg_kind;
         new_param.is_used = param->is_used;
@@ -738,10 +755,10 @@ AstFunction* clone_function_header(bh_allocator a, AstFunction* func) {
 
     if (func->constraints.constraints) {
         memset(&new_func->constraints, 0, sizeof(ConstraintContext));
-        bh_arr_new(global_heap_allocator, new_func->constraints.constraints, bh_arr_length(func->constraints.constraints));
+        bh_arr_new(context->gp_alloc, new_func->constraints.constraints, bh_arr_length(func->constraints.constraints));
 
         bh_arr_each(AstConstraint *, constraint, func->constraints.constraints) {
-            bh_arr_push(new_func->constraints.constraints, (AstConstraint *) ast_clone(a, (AstNode *) *constraint));
+            bh_arr_push(new_func->constraints.constraints, (AstConstraint *) ast_clone(context, (AstNode *) *constraint));
         }
     }
 
@@ -750,16 +767,16 @@ AstFunction* clone_function_header(bh_allocator a, AstFunction* func) {
 
 // Clones a function body from a given function. It is assumed that `dest` is
 // a function from `clone_function_header`.
-void clone_function_body(bh_allocator a, AstFunction* dest, AstFunction* source) {
+void clone_function_body(Context *context, AstFunction* dest, AstFunction* source) {
     if (dest->kind != Ast_Kind_Function) return;
     if (source->kind != Ast_Kind_Polymorphic_Proc && source->kind != Ast_Kind_Function) return;
 
     dest->nodes_that_need_entities_after_clone = NULL;
-    bh_arr_new(global_heap_allocator, dest->nodes_that_need_entities_after_clone, 1);
-    captured_entities = dest->nodes_that_need_entities_after_clone;
+    bh_arr_new(context->gp_alloc, dest->nodes_that_need_entities_after_clone, 1);
+    context->cloner.captured_entities = dest->nodes_that_need_entities_after_clone;
 
-    dest->body = (AstBlock *) ast_clone(a, source->body);
+    dest->body = (AstBlock *) ast_clone(context, source->body);
     
-    dest->nodes_that_need_entities_after_clone = captured_entities;
-    captured_entities = NULL;
+    dest->nodes_that_need_entities_after_clone = context->cloner.captured_entities;
+    context->cloner.captured_entities = NULL;
 }

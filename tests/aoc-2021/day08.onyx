@@ -1,5 +1,5 @@
 PART :: 2
-#load "core/module"
+
 
 use core {*}
 
@@ -28,7 +28,7 @@ segments := ([7] bool).[
 decode_line :: (left, right: str) -> u32 {
     solved_segments: Map(u8, u32);
 
-    left_segments := string.split(left, #char " ");
+    left_segments := string.split(left, ' ');
     defer memory.free_slice(&left_segments);
 
     // Look for 1.
@@ -38,7 +38,7 @@ decode_line :: (left, right: str) -> u32 {
     seven_data := *array.first(left_segments, (x) => x.count == 3);
 
     // Solve the top segment
-    for s: seven_data {
+    for s in seven_data {
         if !array.contains(one_data, s) {
             solved_segments[s] = 1;
         }
@@ -49,7 +49,7 @@ decode_line :: (left, right: str) -> u32 {
         if it.count != 5 do continue;
 
         in_count := 0;
-        for a: one_data do if array.contains(it, a) do in_count += 1;
+        for a in one_data do if array.contains(it, a) do in_count += 1;
 
         if in_count == 2 {
             three_data = it;
@@ -61,8 +61,8 @@ decode_line :: (left, right: str) -> u32 {
     four_data := *array.first(left_segments, (x) => x.count == 4);
 
     // Solve for middle segment
-    for f: four_data {
-        for t: three_data {
+    for f in four_data {
+        for t in three_data {
             if t == f {
                 if !array.contains(one_data, t) {
                     solved_segments[t] = 4;
@@ -76,7 +76,7 @@ decode_line :: (left, right: str) -> u32 {
     for three_data {
         if solved_segments[it] ?? 0 == 4 do continue;
         if solved_segments[it] ?? 0 == 1 do continue;
-        for o: one_data do if it == o do continue continue;
+        for o in one_data do if it == o do continue continue;
 
         solved_segments[it] = 7;
         break;
@@ -84,12 +84,12 @@ decode_line :: (left, right: str) -> u32 {
 
     // Look for 5.
     five_data: str;
-    for seg: left_segments {
+    for seg in left_segments {
         if seg.count != 5 do continue;
 
         for four_data {
             if solved_segments[it] ?? 0 == 4 do continue;
-            for o: one_data do if it == o do continue continue;
+            for o in one_data do if it == o do continue continue;
 
             if array.contains(seg, it) {
                 five_data = seg; 
@@ -99,7 +99,7 @@ decode_line :: (left, right: str) -> u32 {
     }
 
     for five_data {
-        for o: one_data do if it == o {
+        for o in one_data do if it == o {
             solved_segments[it] = 6;
             break;
         }
@@ -120,16 +120,16 @@ decode_line :: (left, right: str) -> u32 {
     }
 
     sum := 0;
-    words := string.split(right, #char " ");
+    words := string.split(right, ' ');
     defer memory.free_slice(&words);
     for& words {
         string.strip_whitespace(it);
         
         num_segments : [7] bool;
-        for w: *it do num_segments[solved_segments[w] ?? 0 - 1] = true;
+        for w in *it do num_segments[solved_segments[w] ?? 0 - 1] = true;
 
         sum *= 10;
-        for i: 10 {
+        for i in 10 {
             if segments[i] == num_segments {
                 sum += i;
                 break;
@@ -143,7 +143,7 @@ decode_line :: (left, right: str) -> u32 {
 // Nicer way of printing a Map.
 #match io.write (w: &io.Writer, x: &Map($K, $V)) {
     io.write(w, "{\n");
-    for e: x.entries {
+    for e in x.entries {
         io.write(w, "    {} => {}\n", e.key, e.value);
     }
     io.write(w, "}");
@@ -153,40 +153,39 @@ decode_line :: (left, right: str) -> u32 {
 
 #operator == (a, b: [] $T) -> bool {
     if a.count != b.count do return false;
-    for i: a.count do if a[i] != b[i] do return false;
+    for i in a.count do if a[i] != b[i] do return false;
     return true;
 }
 
 main :: (args) => {
-    for file: os.with_file("./tests/aoc-2021/input/day08.txt") {
-        reader := io.reader_make(file);
+    use file := os.open("./tests/aoc-2021/input/day08.txt")->unwrap();
+    use reader := io.reader_make(&file);
 
-        answer := 0; 
-        while !io.reader_empty(&reader) {
-            line := io.read_line(&reader, consume_newline=true, inplace=true);
-            left, right := do {
-                parts := string.split(line, #char "|");
-                defer memory.free_slice(&parts);
-                return parts[0], parts[1];
-            };
-            string.strip_whitespace(&left);
-            string.strip_whitespace(&right);
+    answer := 0; 
+    while !io.reader_empty(&reader) {
+        line := io.read_line(&reader, consume_newline=true, inplace=true);
+        left, right := do {
+            parts := string.split(line, '|');
+            defer memory.free_slice(&parts);
+            return parts[0], parts[1];
+        };
+        string.strip_whitespace(&left);
+        string.strip_whitespace(&right);
 
-            #if PART == 1 {
-                words := string.split(right, #char " ");
-                for& words {
-                    string.strip_whitespace(it);
-                    switch it.count {
-                        case 2, 3, 4, 7 do answer += 1;
-                    }
+        #if PART == 1 {
+            words := string.split(right, ' ');
+            for& words {
+                string.strip_whitespace(it);
+                switch it.count {
+                    case 2, 3, 4, 7 do answer += 1;
                 }
-            }
-
-            #if PART == 2 {
-                answer += decode_line(left, right);
             }
         }
 
-        printf("Part {}: {}\n", 1 if PART == 1 else 2, answer);
+        #if PART == 2 {
+            answer += decode_line(left, right);
+        }
     }
+
+    printf("Part {}: {}\n", 1 if PART == 1 else 2, answer);
 }

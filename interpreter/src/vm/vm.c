@@ -4,10 +4,12 @@
 
 #include <sys/mman.h>
 #include <signal.h>
+
 #if defined(__arm64__)
     #include <arm_neon.h>
 #elif defined(__x86_64__)
     #include <x86intrin.h>
+#elif defined(__aarch64__)
 #else
     #error "Unsupported architecture"
 #endif
@@ -32,10 +34,10 @@
 
 static inline void ovm_print_val(ovm_value_t val) {
     switch (val.type) {
-        case OVM_TYPE_I32: printf("i32[%d]", val.i32); break;
-        case OVM_TYPE_I64: printf("i64[%ld]", val.i64); break;
-        case OVM_TYPE_F32: printf("f32[%f]", val.f32); break;
-        case OVM_TYPE_F64: printf("f64[%lf]", val.f64); break;
+        case OVM_TYPE_I32: printf("i32[%d]",   val.i32); break;
+        case OVM_TYPE_I64: printf("i64[%lld]", val.i64); break;
+        case OVM_TYPE_F32: printf("f32[%f]",   val.f32); break;
+        case OVM_TYPE_F64: printf("f64[%lf]",  val.f64); break;
     }
 }
 
@@ -449,7 +451,7 @@ static inline double __ovm_nearest(double f) {
     else                          return __ovm_ceil(f);
 }
 
-static inline double __ovm_copysign(a, b) double a, b; {
+static inline double __ovm_copysign(double a, double b) {
     if ((a > 0 && b > 0) || (a < 0 && b < 0)) return a;
     return -a;
 }
@@ -460,7 +462,7 @@ static void __ovm_trigger_exception(ovm_state_t *state) {
         state->debug->pause_reason = debug_pause_exception;
 
         assert(write(state->debug->state_change_write_fd, "1", 1));
-        sem_wait(&state->debug->wait_semaphore);
+        semaphore_wait(state->debug->wait_semaphore);
     }
 }
 
@@ -515,7 +517,7 @@ static void __ovm_debug_hook(ovm_engine_t *engine, ovm_state_t *state) {
 
     should_wait:
     assert(write(state->debug->state_change_write_fd, "1", 1));
-    sem_wait(&state->debug->wait_semaphore);
+    semaphore_wait(state->debug->wait_semaphore);
     state->debug->state = debug_state_running;
 
     shouldnt_wait:

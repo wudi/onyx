@@ -1,4 +1,4 @@
-#load "core/module"
+
 
 use core {*}
 
@@ -59,12 +59,12 @@ main :: (args: [] cstr) {
     defer bg_free(&graph);
 
     while true {
-        name := string.read_until(&file, #char " ", 1);
+        name := string.read_until(&file, ' ', 1);
         if name.count == 0 do break;
 
         container := bg_get_node(&graph, name);
 
-        string.read_until(&file, #char " ", 2);
+        string.read_until(&file, ' ', 2);
 
         while true {
             if string.starts_with(file, " no") do break;
@@ -72,7 +72,7 @@ main :: (args: [] cstr) {
             count := cast(u32, conv.parse_int(&file));
             string.advance(&file, 1);
 
-            contained_name := string.read_until(&file, #char " ", 1);
+            contained_name := string.read_until(&file, ' ', 1);
             contained := bg_get_node(&graph, contained_name);
 
             // Part 1
@@ -84,8 +84,8 @@ main :: (args: [] cstr) {
             // Part 2
             array.push(&container.contain, .{ bag = contained, count = count });
 
-            bag_word := string.read_until_any(&file, 1, #char " ", #char "\n");
-            if bag_word[bag_word.count - 1] == #char "." do break;
+            bag_word := string.read_until_any(&file, 1, ' ', '\n');
+            if bag_word[bag_word.count - 1] == '.' do break;
         }
 
         string.advance_line(&file);
@@ -103,7 +103,7 @@ main :: (args: [] cstr) {
     //     bag := array.pop(&to_process_bags);
     //     array.push(&processed_bags, bag);
     //     
-    //     for container: bag.contained_in {
+    //     for container in bag.contained_in {
     //         if !array.contains(&processed_bags, container.bag) && !array.contains(&to_process_bags, container.bag) {
     //             // printf("Adding {} to process.\n", container.bag.color);
     //             array.push(&to_process_bags, container.bag);
@@ -125,7 +125,7 @@ main :: (args: [] cstr) {
         mul := array.pop(&multiplier);
         count += mul;
 
-        for bc: bag.contain {
+        for bc in bag.contain {
             array.push(&to_process, bc.bag);
             array.push(&multiplier, bc.count * mul);
         }

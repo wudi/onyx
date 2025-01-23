@@ -7,10 +7,8 @@ use core.math
 use core.memory
 use runtime
 
-#doc """
-    Parses many different types from a string into a value.
-    Uses a custom parser if one has been specified for the type given.
-"""
+/// Parses many different types from a string into a value.
+/// Uses a custom parser if one has been specified for the type given.
 parse_any :: #match {}
 
 #overload
@@ -31,7 +29,7 @@ parse_any :: (target: rawptr, data_type: type_expr, to_parse: str, string_alloca
         case bool {
             dest := cast(&bool) target;
             *dest = false;
-            if to_parse[0] == #char "t" || to_parse[0] == #char "T" {
+            if to_parse[0] == 't' || to_parse[0] == 'T' {
                 *dest = true;
             }
             return true;
@@ -73,8 +71,8 @@ parse_any :: (target: rawptr, data_type: type_expr, to_parse: str, string_alloca
             
             // If the string does *look* like a quoted string,
             // simply return a copy of the whole string.
-            if to_parse[0] != #char "\"" {
-                *dest = string.alloc_copy(to_parse, string_allocator);
+            if to_parse[0] != '"' {
+                *dest = string.copy(to_parse, string_allocator);
                 return true;
             }
 
@@ -82,15 +80,22 @@ parse_any :: (target: rawptr, data_type: type_expr, to_parse: str, string_alloca
             line := to_parse;
             string.advance(&line);
 
-            *dest = string.read_until(&line, #char "\"") |> string.alloc_copy(string_allocator); // @BUG // This does not handle escaped strings!
+            *dest = string.read_until(&line, '"') |> string.copy(string_allocator); // @BUG // This does not handle escaped strings!
             return true;
         }
 
-        case #default {
+        case _ {
             if info.kind == .Enum {
-                // TEMPORARY this needs to look at the backing type for the
-                // enum in order to know how large this integer should be.
-                *cast(&u32) target = ~~ str_to_i64(to_parse);
+                val := str_to_i64(to_parse);
+                
+                einfo := info->as_enum();
+                switch einfo.backing_type {
+                    case i8,  u8  do *cast(&u8)  target = ~~val;
+                    case i16, u16 do *cast(&u16) target = ~~val;
+                    case i32, u32 do *cast(&u32) target = ~~val;
+                    case i64, u64 do *cast(&u64) target = ~~val;
+                }
+
                 return true;
             }
 
@@ -102,13 +107,37 @@ parse_any :: (target: rawptr, data_type: type_expr, to_parse: str, string_alloca
             if info.kind == .Union && union_constructed_from(data_type, Optional) {
                 parsed_successful := parse_any(memory.ptr_add(target, info.alignment), info->as_union().variants[1].type, to_parse, string_allocator);
                 if !parsed_successful {
-                    *cast(& u32) target = ~~ Optional(void).tag_enum.None;
+                    *cast(& u8) target = ~~ Optional(void).tag_enum.None;
                 } else {
-                    *cast(& u32) target = ~~ Optional(void).tag_enum.Some;
+                    *cast(& u8) target = ~~ Optional(void).tag_enum.Some;
                 }
+
+                return true;
             }
         }
     }
 
     return false;
 }
+
+
+/// Shortcut to parse a type `T` using `parse_any`.
+parse :: ($T: type_expr, to_parse: str) -> ? T {
+    v: T;
+    if #this_package.parse_any(&v, to_parse) {
+        return v;
+    } else {
+        return .None;
+    }
+}
+
+/// Shortcut to parse a type `T` using `parse_any`, and specify an allocator.
+parse_with_allocator :: ($T: type_expr, to_parse: str, allocator: Allocator) -> ? T {
+    v: T;
+    if #this_package.parse_any(&v, to_parse, allocator) {
+        return v;
+    } else {
+        return .None;
+    }
+}
+

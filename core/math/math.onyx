@@ -15,11 +15,6 @@ use core.intrinsics.wasm
 //  - Dual numbers
 
 
-E      :: 2.71828182845904523536f;
-PI     :: 3.14159265f;
-TAU    :: 6.28318330f;
-SQRT_2 :: 1.414213562f;
-
 //
 // Trigonometry
 // Basic trig functions have been implemented using taylor series approximations. The
@@ -70,22 +65,22 @@ cos :: (t: f32) -> f32 {
 }
 
 asin :: (t: f32) -> f32 {
-    assert(false, "asin is not implemented yet!");
+    panic("asin is not implemented yet!");
     return 0;
 }
 
 acos :: (t: f32) -> f32 {
-    assert(false, "acos is not implemented yet!");
+    panic("acos is not implemented yet!");
     return 0;
 }
 
 atan :: (t: f32) -> f32 {
-    assert(false, "atan is not implemented yet!");
+    panic("atan is not implemented yet!");
     return 0;
 }
 
 atan2 :: (t: f32) -> f32 {
-    assert(false, "atan2 is not implemented yet!");
+    panic("atan2 is not implemented yet!");
     return 0;
 }
 
@@ -341,11 +336,11 @@ choose :: (n: $T, k: T) -> T {
     assert(T == i32 || T == i64 || T == u32 || T == u64, "bad type for choose function");
 
     ret := 1;
-    for i: (n - k + 1) .. (n + 1) {
+    for i in (n - k + 1) .. (n + 1) {
         ret *= i;
     }
 
-    for i: 1 .. (k + 1) {
+    for i in 1 .. (k + 1) {
         ret /= i;
     }
 
@@ -370,16 +365,16 @@ is_nan :: #match #local {}
 is_nan :: (x: f32) -> bool {
     v := x;
     i := *cast(&u32) &v;
-    return (i & 0x7f800000) == 0x7f800000
-        && (i & 0x007fffff) != 0;
+    return (i & 0x7f800000) == 0x7f800000 &&
+           (i & 0x007fffff) != 0;
 }
 
 #overload
 is_nan :: (x: f64) -> bool {
     v := x;
     i := *cast(&u64) &v;
-    return (i & 0x7ff0000000000000) == 0x7ff0000000000000
-        && (i & 0x000fffffffffffff) != 0;
+    return (i & 0x7ff0000000000000) == 0x7ff0000000000000 &&
+           (i & 0x000fffffffffffff) != 0;
 }
 
 
@@ -389,16 +384,16 @@ is_inf :: #match #local {}
 is_inf :: (x: f32) -> bool {
     v := x;
     i := *cast(&u32) &v;
-    return (i & 0x7f800000) == 0x7f800000
-        && (i & 0x007fffff) == 0;
+    return (i & 0x7f800000) == 0x7f800000 &&
+           (i & 0x007fffff) == 0;
 }
 
 #overload
 is_inf :: (x: f64) -> bool {
     v := x;
     i := *cast(&u64) &v;
-    return (i & 0x7ff0000000000000) == 0x7ff0000000000000
-        && (i & 0x000fffffffffffff) == 0;
+    return (i & 0x7ff0000000000000) == 0x7ff0000000000000 &&
+           (i & 0x000fffffffffffff) == 0;
 }
 
 

@@ -38,7 +38,7 @@ static inline i32 output_custom_section_name(char *name, bh_buffer *buff) {
     return len_len + len;
 }
 
-static void output_instruction(WasmFunc* func, WasmInstruction* instr, bh_buffer* buff);
+static void output_instruction(WasmFunc* func, WasmInstruction* instr, b32 debug_enabled, bh_buffer* buff);
 
 static i32 output_vector(void** arr, i32 stride, i32 arrlen, vector_func elem, bh_buffer* vec_buff) {
     i32 len;
@@ -140,6 +140,8 @@ static i32 output_funcsection(OnyxWasmModule* module, bh_buffer* buff) {
     bh_buffer_append(&vec_buff, leb, leb_len);
 
     bh_arr_each(WasmFunc, func, module->funcs) {
+        assert(func->code);
+
         leb = uint_to_uleb128((u64) (func->type_idx), &leb_len);
         bh_buffer_append(&vec_buff, leb, leb_len);
     }
@@ -154,8 +156,6 @@ static i32 output_funcsection(OnyxWasmModule* module, bh_buffer* buff) {
 }
 
 static i32 output_tablesection(OnyxWasmModule* module, bh_buffer* buff) {
-    // if (bh_arr_length(module->elems) == 0) return 0;
-
     i32 prev_len = buff->length;
     bh_buffer_write_byte(buff, WASM_SECTION_ID_TABLE);
 
@@ -181,7 +181,6 @@ static i32 output_tablesection(OnyxWasmModule* module, bh_buffer* buff) {
 
 static i32 output_memorysection(OnyxWasmModule* module, bh_buffer* buff) {
     // :ProperLinking
-    // if (context.options->use_multi_threading) return 0;
     if (!module->needs_memory_section) return 0;
 
     i32 prev_len = buff->length;
@@ -221,7 +220,7 @@ static i32 output_globalsection(OnyxWasmModule* module, bh_buffer* buff) {
         bh_buffer_write_byte(&vec_buff, 0x01);
 
         bh_arr_each(WasmInstruction, instr, global->initial_value)
-            output_instruction(NULL, instr, &vec_buff);
+            output_instruction(NULL, instr, module->context->options->debug_info_enabled, &vec_buff);
 
         // NOTE: Initial value expression terminator
         bh_buffer_write_byte(&vec_buff, (u8) WI_BLOCK_END);
@@ -262,7 +261,8 @@ static i32 output_importsection(OnyxWasmModule* module, bh_buffer* buff) {
                 output_limits(import->min, import->max, import->shared, &vec_buff);
                 break;
 
-            case WASM_FOREIGN_TABLE: assert(0);
+            case WASM_FOREIGN_GLOBAL:
+            case WASM_FOREIGN_TABLE: assert("Bad foreign import kind" && 0);
         }
     }
 
@@ -423,11 +423,11 @@ static i32 output_locals(WasmFunc* func, bh_buffer* buff) {
     return buff->length - prev_len;
 }
 
-static void output_instruction(WasmFunc* func, WasmInstruction* instr, bh_buffer* buff) {
+static void output_instruction(WasmFunc* func, WasmInstruction* instr, b32 debug_enabled, bh_buffer* buff) {
     i32 leb_len;
     u8* leb;
 
-    if (instr->type == WI_NOP && !context.options->debug_info_enabled) return;
+    if (instr->type == WI_NOP && !debug_enabled) return;
 
     if (instr->type & SIMD_INSTR_MASK) {
         bh_buffer_write_byte(buff, 0xFD);
@@ -565,7 +565,7 @@ static void output_instruction(WasmFunc* func, WasmInstruction* instr, bh_buffer
     }
 }
 
-static i32 output_code(WasmFunc* func, bh_buffer* buff) {
+static i32 output_code(WasmFunc* func, b32 debug_enabled, bh_buffer* buff) {
 
     bh_buffer code_buff;
     bh_buffer_init(&code_buff, buff->allocator, 128);
@@ -576,7 +576,7 @@ static i32 output_code(WasmFunc* func, bh_buffer* buff) {
     assert(func->code);
 
     // Output code
-    bh_arr_each(WasmInstruction, instr, func->code) output_instruction(func, instr, &code_buff);
+    bh_arr_each(WasmInstruction, instr, func->code) output_instruction(func, instr, debug_enabled, &code_buff);
 
     i32 leb_len;
     u8* leb = uint_to_uleb128((u64) code_buff.length, &leb_len);
@@ -600,7 +600,10 @@ static i32 output_codesection(OnyxWasmModule* module, bh_buffer* buff) {
     u8* leb = uint_to_uleb128((u64) bh_arr_length(module->funcs), &leb_len);
     bh_buffer_append(&vec_buff, leb, leb_len);
 
-    bh_arr_each(WasmFunc, func, module->funcs) output_code(func, &vec_buff);
+    bh_arr_each(WasmFunc, func, module->funcs) {
+        assert(func->code);
+        output_code(func, module->context->options->debug_info_enabled, &vec_buff);
+    }
 
     leb = uint_to_uleb128((u64) (vec_buff.length), &leb_len);
     bh_buffer_append(buff, leb, leb_len);
@@ -612,7 +615,7 @@ static i32 output_codesection(OnyxWasmModule* module, bh_buffer* buff) {
 }
 
 static i32 output_datacountsection(OnyxWasmModule* module, bh_buffer* buff) {
-    if (!context.options->use_post_mvp_features) return 0;
+    if (!module->context->options->use_post_mvp_features) return 0;
 
     i32 prev_len = buff->length;
 
@@ -649,12 +652,12 @@ static i32 output_datasection(OnyxWasmModule* module, bh_buffer* buff) {
     bh_arr_each(WasmDatum, datum, module->data) {
         i32 memory_flags = 0x00;
         // :ProperLinking
-        if (context.options->use_multi_threading) memory_flags |= 0x01;
+        if (module->context->options->use_multi_threading) memory_flags |= 0x01;
 
         bh_buffer_write_byte(&vec_buff, memory_flags);
 
         // :ProperLinking
-        if (!context.options->use_multi_threading) {
+        if (!module->context->options->use_multi_threading) {
             bh_buffer_write_byte(&vec_buff, WI_I32_CONST);
             leb = int_to_leb128((i64) datum->offset_, &leb_len);
             bh_buffer_append(&vec_buff, leb, leb_len);
@@ -719,52 +722,9 @@ static i32 output_onyx_libraries_section(OnyxWasmModule* module, bh_buffer* buff
     return buff->length - prev_len;
 }
 
-/*
-static i32 output_onyx_func_offset_section(OnyxWasmModule* module, bh_buffer* buff) {
-    i32 prev_len = buff->length;
-
-    bh_buffer_write_byte(buff, WASM_SECTION_ID_CUSTOM);
-
-    bh_buffer section_buff;
-    bh_buffer_init(&section_buff, buff->allocator, 128);
-
-    output_custom_section_name("_onyx_func_offsets", &section_buff);
-
-    i32 func_count = bh_arr_length(module->funcs) + module->foreign_function_count;
-
-    bh_buffer name_buff;
-    bh_buffer_init(&name_buff, buff->allocator, 1024);
-    u32 str_cursor = func_count * 4;
-    fori (i, 0, func_count) {
-        bh_buffer_write_u32(&section_buff, str_cursor);
-
-        if (i < module->foreign_function_count) {
-            bh_buffer_append(&name_buff, "<imported function>", 20);
-            str_cursor += 20;
-        } else {
-            WasmFunc *func = &module->funcs[i - module->foreign_function_count];
-            assert(func->location);
-            char *str = bh_bprintf("%s:%d,%d\0", func->location->pos.filename, func->location->pos.line, func->location->pos.column);
-            i32 len = strlen(str);
-            bh_buffer_append(&name_buff, str, len + 1);
-            str_cursor += len + 1;
-        }
-    }
-
-    bh_buffer_concat(&section_buff, name_buff);
-
-    output_unsigned_integer(section_buff.length, buff);
-
-    bh_buffer_concat(buff, section_buff);
-    bh_buffer_free(&section_buff);
-
-    return buff->length - prev_len;
-}
-*/
-
 #ifdef ENABLE_DEBUG_INFO
 static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
-    if (!module->debug_context || !context.options->debug_info_enabled) return 0;
+    if (!module->debug_context || !module->context->options->debug_info_enabled) return 0;
 
     DebugContext *ctx = module->debug_context;
 
@@ -838,7 +798,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
             // that this has been implemented right now.
             assert(ctx->sym_info[patch->sym_id].location_type == DSL_REGISTER);
 
-            LocalAllocator *locals = &module->funcs[patch->func_idx - module->foreign_function_count].locals;
+            LocalAllocator *locals = &module->funcs[patch->func_idx].locals;
             ctx->sym_info[patch->sym_id].location_num = local_lookup_idx(locals, patch->local_idx);
         }
 
@@ -875,13 +835,13 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
 
         output_custom_section_name("ovm_debug_types", &section_buff);
 
-        i32 type_count = bh_arr_length(type_map.entries);
+        i32 type_count = bh_arr_length(module->context->types.type_map.entries);
         output_unsigned_integer(type_count, &section_buff);
 
-        bh_arr_each(bh__imap_entry, entry, type_map.entries) {
+        bh_arr_each(bh__imap_entry, entry, module->context->types.type_map.entries) {
             u32 id     = entry->key;
             Type *type = (Type *) entry->value;
-            const char *name = type_get_name(type);
+            const char *name = type_get_name(module->context, type);
 
             output_unsigned_integer(id, &section_buff);
             output_name(name, strlen(name), &section_buff);
@@ -898,7 +858,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
                 if (type->Basic.kind == Basic_Kind_Type_Index) {
                     output_unsigned_integer(5, &section_buff);
                     output_unsigned_integer(2, &section_buff);
-                    output_unsigned_integer(basic_types[Basic_Kind_U32].id, &section_buff);
+                    output_unsigned_integer(module->context->types.basic[Basic_Kind_U32]->id, &section_buff);
                     continue;
                 }
 
@@ -906,7 +866,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
                     // rawptr -> ^void
                     output_unsigned_integer(2, &section_buff);
                     output_unsigned_integer(1, &section_buff);
-                    output_unsigned_integer(basic_types[Basic_Kind_Void].id, &section_buff);
+                    output_unsigned_integer(module->context->types.basic[Basic_Kind_Void]->id, &section_buff);
                     continue;
                 }
 
@@ -958,7 +918,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
                 bh_arr_each(AstEnumValue *, pev, e_type->values) {
                     AstEnumValue *ev = *pev;
 
-                    output_unsigned_integer(get_expression_integer_value(ev->value, NULL), &section_buff);
+                    output_unsigned_integer(get_expression_integer_value(module->context, ev->value, NULL), &section_buff);
                     output_name(ev->token->text, ev->token->length, &section_buff);
                 }
                 continue;
@@ -1024,7 +984,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
 
                 fori (i, 0, mem_count) {
                     StructMember smem;
-                    type_lookup_member_by_idx(type, i, &smem);
+                    type_lookup_member_by_idx(module->context, type, i, &smem);
 
                     output_unsigned_integer(smem.offset, &section_buff);
                     output_unsigned_integer(smem.type->id, &section_buff);
@@ -1053,7 +1013,7 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
                 continue;
             }
 
-            assert(("Unhandled type", 0));
+            assert("Unhandled type in debug info builder" && 0);
         }
 
         output_unsigned_integer(section_buff.length, buff);
@@ -1079,13 +1039,103 @@ static i32 output_ovm_debug_sections(OnyxWasmModule* module, bh_buffer* buff) {
 }
 #endif
 
+static i32 output_name_section(OnyxWasmModule* module, bh_buffer* buff) {
+    i32 prev_len = buff->length;
+
+    bh_buffer_write_byte(buff, WASM_SECTION_ID_CUSTOM);
+
+    bh_buffer name_buff;
+    bh_buffer_init(&name_buff, buff->allocator, 128);
+
+    output_custom_section_name("name", &name_buff);
+
+    output_unsigned_integer(1, &name_buff); // 1 for function names
+
+    bh_buffer func_name_buff;
+    bh_buffer_init(&func_name_buff, buff->allocator, 128);
+
+    output_unsigned_integer(bh_arr_length(module->funcs), &func_name_buff);
+    bh_arr_each(WasmFunc, func, module->funcs) {
+        if (func->name == NULL) continue;
+
+        u64 func_idx = func - module->funcs;
+        func_idx += module->next_foreign_func_idx;
+
+        output_unsigned_integer(func_idx, &func_name_buff);
+
+        output_name(func->name, strlen(func->name), &func_name_buff);
+    }
+
+    output_unsigned_integer(func_name_buff.length, &name_buff);
+    bh_buffer_concat(&name_buff, func_name_buff);
+    bh_buffer_free(&func_name_buff);
+
+    output_unsigned_integer(name_buff.length, buff);
+    bh_buffer_concat(buff, name_buff);
+    bh_buffer_free(&name_buff);
+
+    return buff->length - prev_len;
+}
+
+#define VERSION__(m,i,p) #m "." #i "." #p
+#define VERSION_(m,i,p) VERSION__(m,i,p)
+#define VERSION VERSION_(VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH)
+
+static i32 output_producer_section(OnyxWasmModule* module, bh_buffer *buff) {
+    i32 prev_len = buff->length;
+
+    bh_buffer_write_byte(buff, WASM_SECTION_ID_CUSTOM);
+
+    bh_buffer prod_buff;
+    bh_buffer_init(&prod_buff, buff->allocator, 128);
+
+    output_custom_section_name("producers", &prod_buff);
+
+    output_unsigned_integer(2, &prod_buff);
+
+    output_name("language", 8, &prod_buff);
+    output_unsigned_integer(1, &prod_buff);
+    output_name("onyx", 4, &prod_buff);
+    output_name(VERSION, strlen(VERSION), &prod_buff);
+
+    output_name("processed-by", 12, &prod_buff);
+    output_unsigned_integer(1, &prod_buff);
+    output_name("onyx", 4, &prod_buff);
+    output_name(VERSION, strlen(VERSION), &prod_buff);
+
+    output_unsigned_integer(prod_buff.length, buff);
+    bh_buffer_concat(buff, prod_buff);
+    bh_buffer_free(&prod_buff);
+
+    return buff->length - prev_len;
+}
+
+i32 output_custom_section(OnyxWasmModule *module, bh_buffer *buff, WasmCustomSection *section) {
+    i32 prev_len = buff->length;
+
+    bh_buffer_write_byte(buff, WASM_SECTION_ID_CUSTOM);
+
+    bh_buffer inner_buff;
+    bh_buffer_init(&inner_buff, buff->allocator, 128);
+
+    output_custom_section_name(section->name, &inner_buff);
+
+    bh_buffer_append(&inner_buff, section->contents, section->len);
+
+    output_unsigned_integer(inner_buff.length, buff);
+    bh_buffer_concat(buff, inner_buff);
+    bh_buffer_free(&inner_buff);
+
+    return buff->length - prev_len;
+}
+
 void onyx_wasm_module_write_to_buffer(OnyxWasmModule* module, bh_buffer* buffer) {
-    bh_buffer_init(buffer, global_heap_allocator, 128);
+    bh_buffer_init(buffer, module->context->gp_alloc, 128);
     bh_buffer_append(buffer, WASM_MAGIC_STRING, 4);
     bh_buffer_append(buffer, WASM_VERSION, 4);
 
 #ifdef ENABLE_DEBUG_INFO
-    if (context.options->debug_info_enabled) {
+    if (module->context->options->debug_info_enabled) {
         output_ovm_debug_sections(module, buffer);
     }
 #endif
@@ -1103,14 +1153,41 @@ void onyx_wasm_module_write_to_buffer(OnyxWasmModule* module, bh_buffer* buffer)
     output_datasection(module, buffer);
     output_onyx_libraries_section(module, buffer);
 
+    if (module->context->options->generate_name_section) {
+        output_name_section(module, buffer);
+    }
+
+    output_producer_section(module, buffer);
+
+    fori (i, 0, shlen(module->custom_sections)) {
+        output_custom_section(module, buffer, &module->custom_sections[i].value);
+    }
+
     // TODO: Consider if this should always be included?
     // It can amount to a lot of extra data.
     // output_onyx_func_offset_section(module, buffer);
 }
 
-void onyx_wasm_module_write_to_file(OnyxWasmModule* module, bh_file file) {
-    bh_buffer master_buffer;
-    onyx_wasm_module_write_to_buffer(module, &master_buffer);
 
-    bh_file_write(&file, master_buffer.data, master_buffer.length);
+
+
+//
+// JS File
+//
+
+static i32 compare_js_partials(const void *p1, const void *p2) {
+    return ((JsPartial *) p2)->order - ((JsPartial *) p1)->order;
+}
+
+void onyx_wasm_module_write_js_partials_to_buffer(OnyxWasmModule* module, bh_buffer* buffer) {
+    bh_buffer_init(buffer, module->context->gp_alloc, 128);
+
+    qsort(module->js_partials,
+        bh_arr_length(module->js_partials),
+        sizeof(JsPartial),
+        compare_js_partials);
+
+    bh_arr_each(JsPartial, partial, module->js_partials) {
+        bh_buffer_write_string(buffer, partial->code);
+    }
 }
